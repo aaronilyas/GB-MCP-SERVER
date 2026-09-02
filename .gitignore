@@ -2,3 +2,9 @@
 .venv/
 __pycache__/
 *.pyc
+
+# Accepted ROMs (keep directory, ignore binaries)
+roms/*
+!roms/.gitkeep
+*.gb
+*.gbc

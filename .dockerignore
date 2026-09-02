@@ -1,0 +1,6 @@
+# Build context is only the validator script. Dockerfile COPY path:
+#   docker/validate_gb_rom.py
+*
+!Dockerfile
+!docker/
+!docker/validate_gb_rom.py
