@@ -176,3 +176,18 @@ def map_subdirectory_to_email(session: Session, name: str, email: str) -> Subdir
     session.add(subdirectory)
     session.flush()
     return subdirectory
+
+
+def list_subdirectories_for_email(session: Session, email: str) -> list[Subdirectory]:
+    """Return ROM subdirectories mapped to `email`, oldest first.
+
+    Unknown emails yield an empty list; this does not create a user.
+    """
+    email = normalize_email(email)
+    stmt = (
+        select(Subdirectory)
+        .join(User)
+        .where(User.email == email)
+        .order_by(Subdirectory.created_at.asc(), Subdirectory.id.asc())
+    )
+    return list(session.scalars(stmt).all())

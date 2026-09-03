@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Game Boy ROM MCP server.
 
-Exposes a tool that accepts a ROM from the calling LLM, validates it inside an
-isolated Docker container (no network, dropped capabilities), and only persists
+Exposes tools that accept a ROM from the calling LLM, validate it inside an
+isolated Docker container (no network, dropped capabilities), and only persist
 the file under ./roms/<32-char>/ when validation succeeds. After a ROM is
 accepted the server returns that subdirectory name and requests the LLM user's
-email so the two can be mapped in a local SQLite database.
+email so the two can be mapped in a local SQLite database. A listing tool
+returns that user's mapped subdirectories and ROM header metadata.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -40,9 +42,77 @@ mcp = MCPServer(
         "confirmed .gb/.gbc files under a unique 32-character subdirectory of "
         "roms/. After a ROM passes validation the server returns that "
         "subdirectory name and requests the email address of the user of the "
-        "LLM. Map the two with map_subdirectory_to_email."
+        "LLM. Map the two with map_subdirectory_to_email. List a user's mapped "
+        "ROM subdirectories and game metadata with list_subdirectories_for_email."
     ),
 )
+
+# Cartridge header 0x0147 (Pan Docs). Used so listing can say what mapper/saves a ROM has.
+_CARTRIDGE_TYPES: dict[int, str] = {
+    0x00: "ROM only",
+    0x01: "MBC1",
+    0x02: "MBC1+RAM",
+    0x03: "MBC1+RAM+BATTERY",
+    0x05: "MBC2",
+    0x06: "MBC2+BATTERY",
+    0x08: "ROM+RAM",
+    0x09: "ROM+RAM+BATTERY",
+    0x0B: "MMM01",
+    0x0C: "MMM01+RAM",
+    0x0D: "MMM01+RAM+BATTERY",
+    0x0F: "MBC3+TIMER+BATTERY",
+    0x10: "MBC3+TIMER+RAM+BATTERY",
+    0x11: "MBC3",
+    0x12: "MBC3+RAM",
+    0x13: "MBC3+RAM+BATTERY",
+    0x19: "MBC5",
+    0x1A: "MBC5+RAM",
+    0x1B: "MBC5+RAM+BATTERY",
+    0x1C: "MBC5+RUMBLE",
+    0x1D: "MBC5+RUMBLE+RAM",
+    0x1E: "MBC5+RUMBLE+RAM+BATTERY",
+    0x20: "MBC6",
+    0x22: "MBC7+SENSOR+RUMBLE+RAM+BATTERY",
+    0xFC: "POCKET CAMERA",
+    0xFD: "BANDAI TAMA5",
+    0xFE: "HuC3",
+    0xFF: "HuC1+RAM+BATTERY",
+}
+_CARTRIDGE_BATTERY_TYPES = {
+    0x03,
+    0x06,
+    0x09,
+    0x0D,
+    0x0F,
+    0x10,
+    0x13,
+    0x1B,
+    0x1E,
+    0x22,
+    0xFC,  # Pocket Camera
+    0xFE,  # HuC3
+    0xFF,
+}
+_ROM_SIZE_BYTES = {
+    0x00: 32 * 1024,
+    0x01: 64 * 1024,
+    0x02: 128 * 1024,
+    0x03: 256 * 1024,
+    0x04: 512 * 1024,
+    0x05: 1024 * 1024,
+    0x06: 2 * 1024 * 1024,
+    0x07: 4 * 1024 * 1024,
+    0x08: 8 * 1024 * 1024,
+}
+_RAM_SIZE_BYTES = {
+    0x00: 0,
+    0x01: 2 * 1024,
+    0x02: 8 * 1024,
+    0x03: 32 * 1024,
+    0x04: 128 * 1024,
+    0x05: 64 * 1024,
+}
+_ROM_SUFFIXES = {".gb", ".gbc"}
 
 
 def _sanitize_filename(name: str) -> str:
@@ -108,6 +178,158 @@ def _email_model_request(subdirectory: str) -> dict[str, str]:
             "map_subdirectory_to_email with the subdirectory name and email."
         ),
     }
+
+
+def _isoformat(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+def _decode_header_text(raw: bytes) -> str:
+    raw = raw.split(b"\x00", 1)[0]
+    return "".join(chr(b) for b in raw if 32 <= b < 127).strip()
+
+
+def _read_rom_identity(path: Path) -> dict[str, Any]:
+    """Parse enough of a stored .gb/.gbc header to identify the game."""
+    try:
+        with path.open("rb") as fh:
+            header = fh.read(0x150)
+    except OSError as exc:
+        return {"kind": "rom", "error": f"could not read ROM header: {exc}"}
+
+    if len(header) < 0x150:
+        return {
+            "kind": "rom",
+            "error": f"file too small to contain a Game Boy header ({len(header)} bytes)",
+        }
+
+    cgb_flag = header[0x143]
+    cgb = bool(cgb_flag & 0x80)
+    cgb_only = cgb_flag == 0xC0
+    # CGB uses 0x0143 as the CGB flag, so the printable title is at most 15 chars.
+    title_end = 0x143 if cgb else 0x144
+    title = _decode_header_text(header[0x134:title_end])
+    manufacturer = _decode_header_text(header[0x13F:0x143]) if cgb else ""
+    cart_code = header[0x147]
+    rom_size_code = header[0x148]
+    ram_size_code = header[0x149]
+    destination = header[0x14A]
+    old_licensee = header[0x14B]
+    if old_licensee == 0x33:
+        licensee = _decode_header_text(header[0x144:0x146]) or "0x33"
+    else:
+        licensee = f"0x{old_licensee:02X}"
+
+    if cgb_only:
+        platform = "Game Boy Color (CGB only)"
+    elif cgb:
+        platform = "Game Boy Color (GB compatible)"
+    else:
+        platform = "Game Boy"
+
+    return {
+        "kind": "rom",
+        "title": title or None,
+        "platform": platform,
+        "cgb": cgb,
+        "cgb_only": cgb_only,
+        "sgb": header[0x146] == 0x03,
+        "manufacturer_code": manufacturer or None,
+        "licensee": licensee,
+        "cartridge_type": _CARTRIDGE_TYPES.get(cart_code, f"unknown (0x{cart_code:02X})"),
+        "cartridge_type_code": cart_code,
+        "has_battery": cart_code in _CARTRIDGE_BATTERY_TYPES,
+        "rom_size_code": rom_size_code,
+        "rom_size_bytes": _ROM_SIZE_BYTES.get(rom_size_code),
+        "ram_size_code": ram_size_code,
+        "ram_size_bytes": _RAM_SIZE_BYTES.get(ram_size_code, 0),
+        "destination": "Japan" if destination == 0x00 else "Overseas",
+        "mask_rom_version": header[0x14C],
+    }
+
+
+def _iter_subdirectory_files(dest: Path) -> list[Path]:
+    dest_resolved = dest.resolve()
+    files: list[Path] = []
+    for path in dest.iterdir():
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if not resolved.is_file() or resolved.name.startswith("."):
+            continue
+        if not resolved.is_relative_to(dest_resolved):
+            continue
+        files.append(resolved)
+    files.sort(key=lambda p: p.name.lower())
+    return files
+
+
+def _describe_subdirectory(name: str, created_at: datetime | None) -> dict[str, Any]:
+    dest = ROMS_DIR / name
+    info: dict[str, Any] = {
+        "subdirectory": name,
+        "path": f"roms/{name}",
+        "created_at": _isoformat(created_at),
+        "exists_on_disk": False,
+        "files": [],
+        "games": [],
+    }
+    try:
+        info["exists_on_disk"] = dest.is_dir()
+        if not info["exists_on_disk"]:
+            info["summary"] = "mapped in the database but missing from disk"
+            return info
+
+        files: list[dict[str, Any]] = []
+        games: list[dict[str, Any]] = []
+        for path in _iter_subdirectory_files(dest):
+            stat = path.stat()
+            entry: dict[str, Any] = {
+                "filename": path.name,
+                "path": str(path.relative_to(ROOT)),
+                "size_bytes": stat.st_size,
+                "modified_at": _isoformat(datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)),
+            }
+            if path.suffix.lower() in _ROM_SUFFIXES:
+                identity = _read_rom_identity(path)
+                entry.update(identity)
+                # Truncated/unreadable .gb/.gbc stay in files, not in games.
+                if "error" not in identity:
+                    games.append(
+                        {
+                            "title": identity.get("title"),
+                            "filename": path.name,
+                            "platform": identity.get("platform"),
+                            "cartridge_type": identity.get("cartridge_type"),
+                            "has_battery": identity.get("has_battery"),
+                            "size_bytes": stat.st_size,
+                        }
+                    )
+            else:
+                entry["kind"] = "other"
+            files.append(entry)
+
+        info["files"] = files
+        info["games"] = games
+        titles = [g["title"] for g in games if g.get("title")]
+        if not files:
+            info["summary"] = "empty subdirectory"
+        elif titles:
+            unique = list(dict.fromkeys(titles))
+            n = len(files)
+            info["summary"] = f"{', '.join(unique)} ({n} file{'s' if n != 1 else ''})"
+        else:
+            info["summary"] = ", ".join(f["filename"] for f in files)
+        return info
+    except (OSError, ValueError) as exc:
+        info["error"] = str(exc)
+        info["summary"] = "could not be read"
+        return info
 
 
 def _docker_available() -> None:
@@ -460,6 +682,53 @@ def map_subdirectory_to_email(
         "subdirectory": name,
         "email": normalized_email,
     }
+
+
+@mcp.tool(
+    name="list_subdirectories_for_email",
+    description=(
+        "List ROM subdirectories mapped to the email address of the user of "
+        "the LLM, with metadata that identifies which game each subdirectory "
+        "holds (title from the cartridge header, platform, mapper, battery, "
+        "file names and sizes). Call this when you need to find an existing "
+        "game directory for that user. Ask the user for their email if you "
+        "do not already have it."
+    ),
+)
+def list_subdirectories_for_email(
+    email: Annotated[
+        str,
+        Field(
+            description=(
+                "Email address of the user of the LLM who owns the ROM "
+                "subdirectories. Ask the user for this if you do not already "
+                "have it."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Return mapped roms/ subdirectories and identifying game metadata for an email."""
+    try:
+        with db.session_scope() as session:
+            rows = db.list_subdirectories_for_email(session, email)
+            mapped = [(row.name, row.created_at) for row in rows]
+            normalized_email = db.normalize_email(email)
+
+        subdirectories = [
+            _describe_subdirectory(name, created_at) for name, created_at in mapped
+        ]
+        return {
+            "email": normalized_email,
+            "count": len(subdirectories),
+            "subdirectories": subdirectories,
+        }
+    except Exception as exc:  # noqa: BLE001 - surface clean MCP error
+        return {
+            "email": email,
+            "count": 0,
+            "subdirectories": [],
+            "error": str(exc),
+        }
 
 
 if __name__ == "__main__":
