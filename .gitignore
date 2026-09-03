@@ -8,3 +8,8 @@ roms/*
 !roms/.gitkeep
 *.gb
 *.gbc
+
+# User email <-> subdirectory mapping
+*.db
+*.sqlite
+*.sqlite3
