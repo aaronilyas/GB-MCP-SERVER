@@ -9,6 +9,7 @@ h11==0.16.0
 httpcore2==2.12.0
 httpx2==2.12.0
 idna==3.19
+iniconfig==2.3.0
 jsonschema==4.26.0
 jsonschema-specifications==2025.9.1
 mcp==2.1.1
@@ -16,13 +17,17 @@ mcp-types==2.1.1
 numpy==2.5.2
 opencv-python==5.0.0.93
 opentelemetry-api==1.44.0
+packaging==26.3
+pluggy==1.6.0
 pyboy==2.7.0
 pycparser==3.0
 pydantic==2.13.5
 pydantic_core==2.46.5
+Pygments==2.21.0
 PyJWT==2.13.0
 PySDL2==0.9.17
 pysdl2-dll==2.32.10
+pytest==9.1.1
 python-multipart==0.0.32
 referencing==0.37.0
 rpds-py==2026.6.3

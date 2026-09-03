@@ -2,6 +2,7 @@
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Accepted ROMs (keep directory, ignore binaries)
 roms/*
