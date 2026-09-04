@@ -94,11 +94,14 @@ def token_signing_secret() -> str | None:
 def cors_origins() -> list[str]:
     """Browser Origins allowed to call MCP, well-known, and OAuth HTTP routes.
 
-    Empty means no CORS headers (native clients do not need them). ``*`` allows
-    any Origin without credentials. Comma-separated list otherwise.
+    Empty (default) is ``*`` so hosted LLM UIs (ChatGPT, Claude.ai) can
+    preflight. ``none`` disables CORS. ``*`` allows any Origin without
+    credentials. Comma-separated list otherwise.
     """
     raw = _env("GB_MCP_CORS_ORIGINS")
     if not raw:
+        return ["*"]
+    if raw.lower() == "none":
         return []
     if raw == "*":
         return ["*"]

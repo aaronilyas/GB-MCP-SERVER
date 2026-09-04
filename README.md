@@ -146,14 +146,19 @@ export GB_MCP_BEARER_TOKEN='replace-me'
 python server.py --http
 ```
 
-The process binds `0.0.0.0:8080` by default and serves MCP at `/mcp`.
-`GB_MCP_PUBLIC_URL` is **not** required at import or startup. When it is
-unset, absolute links, RFC 9728 / RFC 8414 metadata, and OAuth token `iss` /
-`aud` derive the origin from the request `Host` header (`X-Forwarded-Proto`
-if present), then fall back to `http://127.0.0.1:8080`. Restarting with a new
-`GB_MCP_PUBLIC_URL` is enough when the tunnel hostname changes. No hostname
-is hard-coded in source. The issuer string is that origin with no trailing
-slash; it must match `authorization_servers` exactly.
+The process binds `0.0.0.0:8080` by default and serves MCP at `/mcp`. The
+origin path `/` is an alias of that endpoint so hosted connectors (ChatGPT
+custom connectors in particular) can paste `https://www.gb-mcp-server.com`
+or `https://gb-mcp-server.com/mcp`. `GB_MCP_PUBLIC_URL` is **not** required
+at import or startup. When it is unset, absolute links, RFC 9728 / RFC 8414
+metadata, and OAuth token `iss` / `aud` derive the origin from the request
+`Host` header (`X-Forwarded-Proto` if present), then fall back to
+`http://127.0.0.1:8080`. If it is set, a `www.` alias of that host still
+uses the request origin so issuer and `resource` match the URL the client
+pasted. Restarting with a new `GB_MCP_PUBLIC_URL` is enough when the tunnel
+hostname changes. No hostname is hard-coded in source. The issuer string is
+that origin with no trailing slash; it must match `authorization_servers`
+exactly.
 
 SSE responses use `Content-Type: text/event-stream` and are not buffered by
 this process. Cloudflare Tunnel buffers ordinary HTTP; it streams SSE. **Quick
@@ -194,14 +199,16 @@ custom MCP, Copilot Studio, and any other spec-compliant MCP host) cannot paste
 metadata → RFC 8414 (or OpenID Connect discovery) → Dynamic Client Registration
 → authorization-code + PKCE S256 → Bearer access token on `/mcp`.
 
-Use the public MCP URL:
+Use the public origin or the MCP path — both work:
 
 ```
+https://<public-host>
 https://<public-host>/mcp
 ```
 
-That host must be a **named** Cloudflare tunnel (or other reverse proxy that
-streams SSE). Quick tunnels (`*.trycloudflare.com`) still do not stream SSE.
+`www` and apex are treated as the same site. That host must be a **named**
+Cloudflare tunnel (or other reverse proxy that streams SSE). Quick tunnels
+(`*.trycloudflare.com`) still do not stream SSE.
 
 In the host UI, choose OAuth (not “no authentication”, not a pasted API key).
 Complete the consent page in the browser. Do **not** paste
@@ -283,7 +290,8 @@ Native clients (Claude Desktop, Cursor) do not use CORS. Browser clients
 
 | `GB_MCP_CORS_ORIGINS` | Effect |
 | --- | --- |
-| empty (default) | No CORS headers |
+| empty (default) | `*` — any Origin, **without** credentials (ChatGPT / Claude.ai preflight) |
+| `none` | No CORS headers |
 | `http://localhost:6274,http://127.0.0.1:6274` | Those Origins only |
 | `*` | Any Origin, **without** credentials |
 

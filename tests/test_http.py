@@ -254,6 +254,57 @@ def test_mcp_options_does_not_require_bearer(http_client: TestClient) -> None:
     assert response.status_code != 401
 
 
+def test_origin_url_is_an_mcp_alias(http_client: TestClient) -> None:
+    """ChatGPT connectors paste the origin; `/` must not 404."""
+    response = http_client.post(
+        "/",
+        headers=_mcp_headers(token=None),
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+    )
+    assert response.status_code == 401
+    assert "www-authenticate" in response.headers
+    assert "resource_metadata=" in response.headers["www-authenticate"]
+    assert response.json()["error"] == "invalid_token"
+
+
+def test_origin_get_is_protected_even_with_browser_accept(http_client: TestClient) -> None:
+    mcp = http_client.get(
+        "/",
+        headers={"Accept": "application/json, text/event-stream"},
+    )
+    browser = http_client.get(
+        "/",
+        headers={"Accept": "text/html,application/xhtml+xml;q=0.9,*/*;q=0.8"},
+    )
+    assert mcp.status_code == 401
+    assert browser.status_code == 401
+    assert "www-authenticate" in mcp.headers
+    assert "www-authenticate" in browser.headers
+
+
+def test_default_cors_allows_chatgpt_origin(http_client: TestClient) -> None:
+    response = http_client.options(
+        "/mcp",
+        headers={
+            "Origin": "https://chatgpt.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type,accept,mcp-session-id",
+        },
+    )
+    assert response.status_code in {200, 204}
+    assert response.headers.get("access-control-allow-origin") == "*"
+    assert response.headers.get("access-control-allow-credentials") in {None, "false"}
+    root = http_client.options(
+        "/",
+        headers={
+            "Origin": "https://chatgpt.com",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "authorization,content-type",
+        },
+    )
+    assert root.headers.get("access-control-allow-origin") == "*"
+
+
 def test_jwt_bearer_is_accepted(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GB_MCP_BEARER_TOKEN", raising=False)
     monkeypatch.setenv("GB_MCP_JWT_SECRET", "jwt-test-secret-32-bytes-minimum!")
@@ -356,3 +407,40 @@ def test_public_base_url_prefers_env_over_host(http_env, monkeypatch: pytest.Mon
     )
     assert public_base_url(request) == "https://gb-mcp-server.com"
     assert mcp_resource_url(request) == "https://gb-mcp-server.com/mcp"
+
+
+def test_public_base_url_follows_www_alias_of_configured_origin(
+    http_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GB_MCP_PUBLIC_URL", "https://gb-mcp-server.com")
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [
+                (b"host", b"www.gb-mcp-server.com"),
+                (b"x-forwarded-proto", b"https"),
+            ],
+            "scheme": "http",
+            "server": ("127.0.0.1", 8080),
+        }
+    )
+    assert public_base_url(request) == "https://www.gb-mcp-server.com"
+    assert mcp_resource_url(request) == "https://www.gb-mcp-server.com/mcp"
+
+
+def test_well_known_on_www_host_matches_www_resource(
+    http_env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GB_MCP_PUBLIC_URL", "https://gb-mcp-server.com")
+    app = create_http_app(server.mcp)
+    with TestClient(app) as client:
+        response = client.get(
+            "/.well-known/oauth-protected-resource",
+            headers={"Host": "www.gb-mcp-server.com", "X-Forwarded-Proto": "https"},
+        )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["resource"] == "https://www.gb-mcp-server.com/mcp"
+    assert body["authorization_servers"] == ["https://www.gb-mcp-server.com"]

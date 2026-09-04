@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import secrets
 from typing import Any
+from urllib.parse import urlparse
 
 import jwt
 from jwt.exceptions import PyJWTError
@@ -48,22 +49,60 @@ def _fallback_origin() -> str:
     return f"http://127.0.0.1:{config.http_port()}"
 
 
+def _origin_from_request(request: Request) -> str | None:
+    host = (request.headers.get("host") or "").strip()
+    if not host:
+        return None
+    forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+    scheme = forwarded or request.url.scheme or "http"
+    return f"{scheme}://{host}"
+
+
+def _hostname_key(host: str) -> str:
+    value = host.lower()
+    return value[4:] if value.startswith("www.") else value
+
+
+def _effective_port(parsed) -> int | None:
+    port = parsed.port
+    if parsed.scheme == "https" and port == 443:
+        return None
+    if parsed.scheme == "http" and port == 80:
+        return None
+    return port
+
+
+def _same_public_site(origin: str, configured: str) -> bool:
+    """True when origin is the configured public site, including a www alias."""
+    left = urlparse(origin)
+    right = urlparse(configured)
+    if left.scheme.lower() != right.scheme.lower():
+        return False
+    left_host = _hostname_key(left.hostname or "")
+    right_host = _hostname_key(right.hostname or "")
+    if not left_host or left_host != right_host:
+        return False
+    return _effective_port(left) == _effective_port(right)
+
+
 def public_base_url(request: Request | None = None) -> str:
     """Origin used for absolute links and RFC 9728 `resource`.
 
-    Prefer `GB_MCP_PUBLIC_URL`. If unset, use the request Host (and
-    X-Forwarded-Proto when present). Last resort is loopback with the
-    configured port. Never raises because a domain is missing.
+    Prefer `GB_MCP_PUBLIC_URL`. If the request Host is the same site as that
+    origin (including a ``www.`` alias), use the request origin so ChatGPT
+    connectors pasted at ``https://www.…`` see matching issuer/resource URLs.
+    If unset, use the request Host (and X-Forwarded-Proto when present). Last
+    resort is loopback with the configured port. Never raises because a domain
+    is missing.
     """
     configured = config.public_url()
+    request_origin = _origin_from_request(request) if request is not None else None
     if configured:
+        if request_origin and _same_public_site(request_origin, configured):
+            return request_origin.rstrip("/")
         return configured
-    if request is not None:
-        host = (request.headers.get("host") or "").strip()
-        if host:
-            forwarded = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
-            scheme = forwarded or request.url.scheme or "http"
-            return f"{scheme}://{host}"
+    if request_origin:
+        return request_origin.rstrip("/")
     return _fallback_origin()
 
 
@@ -202,6 +241,43 @@ def unauthorized_response(request: Request) -> JSONResponse:
     )
 
 
+_MCP_ROOT_METHODS = frozenset({"GET", "POST", "DELETE", "OPTIONS"})
+
+
+class RootMcpAliasMiddleware:
+    """Serve MCP at ``/`` as well as ``GB_MCP_PATH`` (default ``/mcp``).
+
+    ChatGPT custom connectors probe the exact URL the user pastes. Users often
+    paste the origin (``https://www.example.com``) rather than ``/mcp``. A 404
+    at ``/`` is reported as "Connection failed" before OAuth can start.
+    """
+
+    def __init__(self, app: ASGIApp, mcp_path: str) -> None:
+        self.app = app
+        self.mcp_path = mcp_path.rstrip("/") or "/mcp"
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        if self.mcp_path in {"/", ""}:
+            await self.app(scope, receive, send)
+            return
+        path = scope.get("path") or "/"
+        method = scope.get("method") or "GET"
+        if path not in {"/", ""} or method not in _MCP_ROOT_METHODS:
+            await self.app(scope, receive, send)
+            return
+        scope = dict(scope)
+        scope["path"] = self.mcp_path
+        raw = scope.get("raw_path")
+        if isinstance(raw, (bytes, bytearray)):
+            query = bytes(raw).split(b"?", 1)
+            suffix = b"?" + query[1] if len(query) == 2 else b""
+            scope["raw_path"] = self.mcp_path.encode("ascii") + suffix
+        await self.app(scope, receive, send)
+
+
 class BearerAuthMiddleware:
     """Require a bearer token on the MCP HTTP path. Does not buffer SSE bodies."""
 
@@ -296,6 +372,8 @@ def create_http_app(mcp_server: MCPServer) -> Starlette:
             cors.cls,
             **cors.kwargs,
         )
+    # Outermost: ChatGPT probes the pasted origin (``/``) before ``/mcp``.
+    app.add_middleware(RootMcpAliasMiddleware, mcp_path=path)
     return app
 
 

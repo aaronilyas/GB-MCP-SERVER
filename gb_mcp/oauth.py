@@ -349,16 +349,29 @@ def oauth_claims_match_request(
     issuer: str,
     resource: str,
 ) -> bool:
-    if claims.get("iss") != issuer:
+    token_iss = claims.get("iss")
+    if not isinstance(token_iss, str) or not _issuers_equivalent(token_iss, issuer):
         return False
     audiences = _audience_values(claims.get("aud"))
-    if resource not in audiences:
-        return False
-    return True
+    if resource in audiences:
+        return True
+    return any(same_resource(audience, resource) for audience in audiences)
 
 
 def same_resource(requested: str, expected: str) -> bool:
-    return check_resource_allowed(requested, expected) and check_resource_allowed(expected, requested)
+    """True when two resource URLs identify this MCP server.
+
+    Exact RFC 8707 hierarchical match first. Hosted connectors often send the
+    origin they pasted (with or without ``www``, with or without ``/mcp``);
+    those are the same resource as the canonical MCP URL on this site.
+    """
+    if check_resource_allowed(requested, expected) and check_resource_allowed(expected, requested):
+        return True
+    left = _resource_origin_key(requested)
+    right = _resource_origin_key(expected)
+    if left is None or right is None or left != right:
+        return False
+    return _resource_path_key(requested) == _resource_path_key(expected)
 
 
 async def handle_authorize(request: Request, *, issuer: str, resource: str) -> Response:
@@ -670,6 +683,39 @@ def _string_param(params: Any, key: str) -> str | None:
         return None
     value = params.get(key)
     return value if isinstance(value, str) else None
+
+
+def _issuers_equivalent(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    left_key = _resource_origin_key(left)
+    right_key = _resource_origin_key(right)
+    return left_key is not None and left_key == right_key
+
+
+def _resource_origin_key(url: str) -> tuple[str, str, int | None] | None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    host = (parsed.hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    if not host:
+        return None
+    port = parsed.port
+    if parsed.scheme == "https" and port == 443:
+        port = None
+    elif parsed.scheme == "http" and port == 80:
+        port = None
+    return parsed.scheme.lower(), host, port
+
+
+def _resource_path_key(url: str) -> str:
+    path = urlparse(url).path.rstrip("/") or "/"
+    mcp = config.http_path().rstrip("/") or "/mcp"
+    if path in {"/", mcp}:
+        return mcp
+    return path
 
 
 def _audience_values(aud: Any) -> list[str]:

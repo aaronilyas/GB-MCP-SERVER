@@ -398,6 +398,46 @@ def test_refresh_token_rotates(oauth_client: TestClient) -> None:
     assert reused.json()["error"] == "invalid_grant"
 
 
+def test_www_and_origin_resource_urls_match_canonical_mcp() -> None:
+    from gb_mcp.oauth import same_resource
+
+    canonical = "https://gb.example/mcp"
+    assert same_resource(canonical, canonical)
+    assert same_resource("https://www.gb.example/mcp", canonical)
+    assert same_resource("https://www.gb.example", canonical)
+    assert same_resource("https://gb.example", canonical)
+    assert not same_resource("https://evil.example/mcp", canonical)
+    assert not same_resource("https://gb.example/other", canonical)
+
+
+def test_authorize_accepts_www_origin_resource_parameter(oauth_client: TestClient) -> None:
+    redirect_uri = "https://chatgpt.com/connector_platform_oauth_redirect"
+    registered = _register(oauth_client, redirect_uri)
+    verifier, challenge = _pkce()
+    code = _authorize_and_allow(
+        oauth_client,
+        client_id=registered["client_id"],
+        redirect_uri=redirect_uri,
+        challenge=challenge,
+        resource="https://www.gb.example",
+    )
+    tokens = _token(
+        oauth_client,
+        client_id=registered["client_id"],
+        code=code,
+        redirect_uri=redirect_uri,
+        verifier=verifier,
+        resource="https://www.gb.example",
+    )
+    session_id = _initialize(oauth_client, token=tokens["access_token"])
+    listed = oauth_client.post(
+        "/mcp",
+        headers=_mcp_headers(token=tokens["access_token"], session_id=session_id),
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    )
+    assert listed.status_code == 200
+
+
 def test_authorize_rejects_unregistered_redirect_host(oauth_client: TestClient) -> None:
     registered = _register(oauth_client, "https://client.example/cb")
     verifier, challenge = _pkce()
