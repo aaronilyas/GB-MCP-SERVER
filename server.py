@@ -68,7 +68,8 @@ mcp = MCPServer(
         "which returns PNG screenshot(s) of the resulting screen; stop it with "
         "stop_pyboy. Five minutes without button input auto-saves the game and "
         "closes PyBoy. Read-only resources expose the owned ROM list, cartridge "
-        "header metadata, and live PyBoy session status for an email."
+        "header metadata, and live PyBoy session status for an email. "
+        "A full how-to is at the gb://usage resource; reading it is optional."
     ),
 )
 
@@ -710,6 +711,89 @@ def stop_pyboy(
             "subdirectory": name,
             "error": str(exc),
         }
+
+
+_USAGE_GUIDE = """# How to use this Game Boy MCP server
+
+This is a how-to for the connected model. Reading it is optional: every tool
+works even if you never read `gb://usage`. This resource contains no user data.
+
+Email is application identity, not transport authentication. Never put a
+bearer token, signed token, login secret, API key, or Docker credential in a
+tool argument. Never guess, enumerate, or probe other users' emails or
+subdirectory names. Only submit a ROM the human provided; do not scrape the
+host filesystem or send unrelated files. Subdirectory names are the
+32-character hex strings returned by `submit_gb_rom`, not game titles.
+
+## Workflow
+
+Typical order: submit → map → list → load → input → stop. Skip submit and map
+when the human already has mapped games.
+
+### 1. submit_gb_rom
+
+Provide the ROM as base64 (`rom_base64`). `filename` and `email` are optional.
+Validation runs in an isolated Docker container. On success the result includes
+a 32-character hexadecimal `subdirectory` name. Play is per-subdirectory.
+
+If `email` was omitted or mapping failed, follow `model_request` in the result
+and call `map_subdirectory_to_email`. Do not invent an email.
+
+### 2. map_subdirectory_to_email
+
+Bind that 32-character hex name to the LLM user's email. Ask the human for
+their email if you do not already have it. Never invent an email.
+
+### 3. list_subdirectories_for_email
+
+Find that user's games. Results include cartridge header title, platform, and
+other identifying metadata. Ask the human for their email if you do not
+already have it.
+
+### 4. load_subdirectory_rom
+
+`email` and `subdirectory` are both required. Starts or resumes the play
+instance for that owned subdirectory. One live session per email: switching
+games saves and stops the previous instance, then starts the new one. A later
+load of the same subdirectory restores that save.
+
+### 5. send_pyboy_input
+
+`email` and `subdirectory` are both required. Send button chords and receive
+PNG screenshot(s). Pass either a single chord as `buttons` (optional
+`hold_frames`) or an ordered `steps` list — not both. Valid buttons: a, b,
+start, select, up, down, left, right. `screenshot_mode` `final` (default)
+returns one PNG after all steps; `all` returns one PNG after each step.
+A successful call resets the 5-minute idle timer.
+
+### 6. stop_pyboy
+
+`email` and `subdirectory` are both required. Saves, then stops the play
+instance. After about 5 minutes with no button input the session also
+auto-saves and closes.
+
+## Read-only data resources
+
+These URIs are live user data and require an email. They are not a substitute
+for this guide:
+
+- `gb://users/{email}/roms` — owned ROM list and game metadata
+- `gb://users/{email}/roms/{subdirectory}` — cartridge header metadata for an owned ROM
+- `gb://users/{email}/session` — live play-instance status for that email
+"""
+
+
+@mcp.resource(
+    "gb://usage",
+    mime_type="text/markdown",
+    description=(
+        "How a connected model should use this Game Boy MCP server (submit, map, "
+        "list, load, play, stop). Contains no user data."
+    ),
+)
+def usage_resource() -> str:
+    """Return the static model-facing how-to. No user data, no I/O."""
+    return _USAGE_GUIDE
 
 
 @mcp.resource(

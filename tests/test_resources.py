@@ -1,11 +1,31 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import db
 import server
 
 from rom_builder import make_rom
+
+_TOOL_NAMES = (
+    "submit_gb_rom",
+    "map_subdirectory_to_email",
+    "list_subdirectories_for_email",
+    "load_subdirectory_rom",
+    "send_pyboy_input",
+    "stop_pyboy",
+)
+
+_OPS_SUBSTRINGS = (
+    "GB_MCP_BEARER_TOKEN",
+    "GB_MCP_JWT_SECRET",
+    "docker.sock",
+    "Authorization",
+    "Bearer",
+    "password",
+    "JWT",
+)
 
 
 def _mapped_rom(roms_dir: Path, *, email: str = "owner@example.com", name: str | None = None) -> str:
@@ -51,3 +71,32 @@ def test_session_status_resource(isolated_db, roms_dir: Path, pyboy_manager) -> 
     assert live["email"] == "owner@example.com"
     assert live["subdirectory"] == name
     assert live["rom"] == "tetris.gb"
+
+
+def test_usage_resource_is_static_markdown_howto() -> None:
+    body = server.usage_resource()
+    assert isinstance(body, str)
+    assert body.strip()
+    for name in _TOOL_NAMES:
+        assert name in body
+
+    assert inspect.signature(server.usage_resource).parameters == {}
+    resources = {str(item.uri): item for item in server.mcp._resource_manager.list_resources()}
+    usage = resources["gb://usage"]
+    assert "{" not in str(usage.uri)
+    assert usage.mime_type == "text/markdown"
+    templates = [item.uri_template for item in server.mcp._resource_manager.list_templates()]
+    assert "gb://usage" not in templates
+
+
+def test_usage_resource_body_is_stable() -> None:
+    first = server.usage_resource()
+    second = server.usage_resource()
+    assert first == second
+    assert first == server._USAGE_GUIDE
+
+
+def test_usage_resource_omits_ops_secrets() -> None:
+    body = server.usage_resource()
+    for needle in _OPS_SUBSTRINGS:
+        assert needle not in body, needle

@@ -62,6 +62,7 @@ minutes without button input.
 | `gb://users/{email}/roms` | Owned ROM list and game metadata |
 | `gb://users/{email}/roms/{subdirectory}` | Cartridge header metadata for an owned ROM |
 | `gb://users/{email}/session` | Live play-instance status for that email |
+| `gb://usage` | How a connected model should use this server (submit, map, list, load, play, stop). Contains no user data. |
 
 ## Compose
 
