@@ -14,3 +14,21 @@ roms/*
 *.db
 *.sqlite
 *.sqlite3
+
+# Secrets, local env, tunnel credentials, TLS material
+.env
+*.pem
+*.key
+*.crt
+*.p12
+cert.pem
+credentials.json
+*.token
+
+# cloudflared runtime (commit only *.example)
+cloudflared/config.yml
+cloudflared/config.yaml
+cloudflared/*.json
+cloudflared/*.pem
+cloudflared/*.key
+!cloudflared/config.example.yml

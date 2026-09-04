@@ -1,0 +1,29 @@
+# Example cloudflared ingress for the Game Boy MCP HTTP server.
+#
+# Copy to config.yml and replace ${TUNNEL_HOSTNAME} with the public hostname
+# of your *named* Cloudflare Tunnel (for example gb.yourdomain.com).
+# cloudflared does not expand this placeholder; a human must substitute it.
+#
+# When docker compose uses TUNNEL_TOKEN, Zero Trust owns the public hostname
+# route in the dashboard. This file is for operators who prefer a local
+# config.yml. Do not commit the copied file, credentials, or origin certs.
+#
+# Host-run (no compose): change `service` to http://localhost:8080.
+#
+# originRequest: keep chunked encoding and HTTP/1.1 to origin so MCP SSE
+# (`Content-Type: text/event-stream`) is not buffered. Cloudflare Quick
+# Tunnels (*.trycloudflare.com via `cloudflared tunnel --url`) do not
+# support SSE and will not work with a real MCP client.
+
+ingress:
+  - hostname: ${TUNNEL_HOSTNAME}
+    service: http://gb-mcp-server:8080
+    originRequest:
+      # false (the default) is required: true waits for the full body.
+      disableChunkedEncoding: false
+      # HTTP/2 to origin can stall text/event-stream; MCP SSE needs HTTP/1.1.
+      http2Origin: false
+      connectTimeout: 30s
+      keepAliveTimeout: 90s
+      noTLSVerify: false
+  - service: http_status:404

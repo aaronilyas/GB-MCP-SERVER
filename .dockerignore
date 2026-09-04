@@ -1,6 +1,17 @@
-# Build context is only the validator script. Dockerfile COPY path:
-#   docker/validate_gb_rom.py
-*
-!Dockerfile
-!docker/
-!docker/validate_gb_rom.py
+# Shared by the validator image (Dockerfile) and the HTTP MCP image
+# (Dockerfile.server). Keep secrets, venv, and ROM binaries out of the context.
+.git
+.venv
+__pycache__
+.pytest_cache
+*.pyc
+.env
+*.sqlite3
+*.db
+*.pem
+*.key
+*.crt
+roms
+cloudflared/*.json
+cloudflared/config.yml
+cloudflared/config.yaml

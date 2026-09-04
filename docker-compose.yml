@@ -1,0 +1,53 @@
+# Game Boy MCP HTTP server + Cloudflare Tunnel sidecar.
+#
+# The MCP process is reachable as gb-mcp-server:8080 on the compose network.
+# cloudflared publishes that origin; 8080 does not need to be opened on the
+# host firewall. Uncomment `ports` only for local debugging.
+#
+# Before `docker compose up`:
+#   1. Copy .env.example to .env
+#   2. Paste TUNNEL_TOKEN from Zero Trust → Networks → Tunnels
+#   3. After the named tunnel hostname exists, set GB_MCP_PUBLIC_URL and
+#      GB_MCP_BEARER_TOKEN, then recreate the MCP service.
+
+services:
+  gb-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: gb-mcp-server:local
+    command: ["python", "server.py", "--http"]
+    env_file:
+      - .env
+    environment:
+      GB_MCP_HOST: ${GB_MCP_HOST:-0.0.0.0}
+      GB_MCP_PORT: ${GB_MCP_PORT:-8080}
+      GB_MCP_PATH: ${GB_MCP_PATH:-/mcp}
+      GB_MCP_PUBLIC_URL: ${GB_MCP_PUBLIC_URL:-}
+      GB_MCP_BEARER_TOKEN: ${GB_MCP_BEARER_TOKEN:-}
+      GB_MCP_JWT_SECRET: ${GB_MCP_JWT_SECRET:-}
+      GB_MCP_CORS_ORIGINS: ${GB_MCP_CORS_ORIGINS:-}
+      GB_PYBOY_WINDOW: ${GB_PYBOY_WINDOW:-null}
+      GB_ROM_VALIDATOR_IMAGE: ${GB_ROM_VALIDATOR_IMAGE:-gb-rom-validator:latest}
+    volumes:
+      - ./roms:/app/roms
+      # Host file must exist (otherwise Docker creates a directory here):
+      #   touch user_subdirectories.sqlite3
+      - ./user_subdirectories.sqlite3:/app/user_subdirectories.sqlite3
+      # Isolated ROM validation still uses host Docker (same as stdio mode).
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "8080"
+    # Optional local debug (not required for the tunnel):
+    # ports:
+    #   - "8080:8080"
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN}
+    depends_on:
+      - gb-mcp-server
+    restart: unless-stopped

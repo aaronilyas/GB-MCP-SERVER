@@ -9,10 +9,15 @@ email so the two can be mapped in a local SQLite database. A listing tool
 returns that user's mapped subdirectories and ROM header metadata. Mapped
 subdirectories can be loaded into a persistent PyBoy session (idle auto-save
 and close after 5 minutes without input).
+
+Default transport is stdio (`python server.py`). Streamable HTTP is opt-in
+(`python server.py --http` or GB_MCP_TRANSPORT=streamable-http) and sits
+behind a bearer token; see README.md.
 """
 
 from __future__ import annotations
 
+import argparse
 import base64
 import re
 from typing import Annotated, Any
@@ -31,6 +36,7 @@ from gb_mcp.emulator.session import (
     MAX_INPUT_STEPS,
     SCREENSHOT_MODES,
 )
+from gb_mcp.http import attach_public_routes, run_http
 from gb_mcp.isolation.docker import (
     _create_isolated_container,
     _destroy_container,
@@ -61,7 +67,8 @@ mcp = MCPServer(
         "by sending a button chord or a sequence of chords with send_pyboy_input, "
         "which returns PNG screenshot(s) of the resulting screen; stop it with "
         "stop_pyboy. Five minutes without button input auto-saves the game and "
-        "closes PyBoy."
+        "closes PyBoy. Read-only resources expose the owned ROM list, cartridge "
+        "header metadata, and live PyBoy session status for an email."
     ),
 )
 
@@ -705,6 +712,90 @@ def stop_pyboy(
         }
 
 
-if __name__ == "__main__":
+@mcp.resource(
+    "gb://users/{email}/roms",
+    mime_type="application/json",
+    description=(
+        "Read-only list of ROM subdirectories mapped to the LLM user's email, "
+        "with cartridge title/platform metadata. Email is application identity, "
+        "not transport authentication."
+    ),
+)
+def owned_roms_resource(email: str) -> dict[str, Any]:
+    """List owned ROM subdirectories for an email."""
+    return list_subdirectories_for_email(email)
+
+
+@mcp.resource(
+    "gb://users/{email}/roms/{subdirectory}",
+    mime_type="application/json",
+    description=(
+        "Read-only cartridge header metadata for a ROM subdirectory owned by "
+        "the given email. Both email and the 32-character subdirectory name "
+        "are required."
+    ),
+)
+def rom_header_resource(email: str, subdirectory: str) -> dict[str, Any]:
+    """Return header metadata for an owned ROM subdirectory."""
+    resolved = _owned_subdirectory(email, subdirectory)
+    if isinstance(resolved, dict):
+        return resolved
+    normalized_email, name = resolved
+    created_at = None
+    try:
+        with db.session_scope() as session:
+            row = db.get_subdirectory_for_email(session, name, normalized_email)
+            if row is not None:
+                created_at = row.created_at
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": str(exc),
+        }
+    info = _describe_subdirectory(name, created_at)
+    info["email"] = normalized_email
+    return info
+
+
+@mcp.resource(
+    "gb://users/{email}/session",
+    mime_type="application/json",
+    description=(
+        "Read-only live PyBoy session status for the LLM user identified by "
+        "email (running flag, ROM, idle timer). Email is application identity."
+    ),
+)
+def session_status_resource(email: str) -> dict[str, Any]:
+    """Return the live PyBoy session status for an email, if any."""
+    try:
+        normalized_email = db.normalize_email(email)
+    except ValueError as exc:
+        return {"email": email, "running": False, "error": str(exc)}
+    session = pyboy_sessions.manager.get(normalized_email)
+    if session is None:
+        return {"email": normalized_email, "running": False}
+    return session.status()
+
+
+attach_public_routes(mcp)
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Game Boy ROM MCP server")
+    parser.add_argument(
+        "--http",
+        action="store_true",
+        help="Serve Streamable HTTP on GB_MCP_PATH (default /mcp) instead of stdio",
+    )
+    args = parser.parse_args(argv)
     db.init_db()
+    if args.http or config.http_transport_requested():
+        run_http(mcp)
+        return
     mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()
+

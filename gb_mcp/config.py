@@ -15,3 +15,67 @@ MAX_ROM_B64_CHARS = (MAX_ROM_BYTES + 2) // 3 * 4
 # Close a PyBoy session after this many seconds with no model button input.
 IDLE_TIMEOUT_SECONDS = int(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "300"))
 PYBOY_WINDOW = os.environ.get("GB_PYBOY_WINDOW", "null")
+
+_HTTP_TRANSPORTS = frozenset({"http", "streamable-http", "streamable_http"})
+
+
+def _env(name: str, default: str = "") -> str:
+    return os.environ.get(name, default).strip()
+
+
+def http_host() -> str:
+    """Bind address for Streamable HTTP. Read at call time, never at import."""
+    return _env("GB_MCP_HOST", "0.0.0.0") or "0.0.0.0"
+
+
+def http_port() -> int:
+    """TCP port for Streamable HTTP. Read at call time, never at import."""
+    raw = _env("GB_MCP_PORT", "8080") or "8080"
+    return int(raw)
+
+
+def http_path() -> str:
+    """URL path for the MCP endpoint (default /mcp)."""
+    path = _env("GB_MCP_PATH", "/mcp") or "/mcp"
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return path.rstrip("/") or "/mcp"
+
+
+def public_url() -> str | None:
+    """Absolute public origin, if configured.
+
+    Used only for absolute links and RFC 9728 protected-resource metadata.
+    Unset is valid: callers derive the origin from the request Host header.
+    """
+    value = _env("GB_MCP_PUBLIC_URL").rstrip("/")
+    return value or None
+
+
+def bearer_token() -> str | None:
+    """Shared secret accepted as ``Authorization: Bearer <token>``."""
+    return _env("GB_MCP_BEARER_TOKEN") or None
+
+
+def jwt_secret() -> str | None:
+    """HS256 secret used to verify PyJWT-signed bearer tokens."""
+    return _env("GB_MCP_JWT_SECRET") or None
+
+
+def cors_origins() -> list[str]:
+    """Browser Origins allowed to call the HTTP MCP endpoint.
+
+    Empty means no CORS headers (native clients do not need them). ``*`` allows
+    any Origin without credentials. Comma-separated list otherwise.
+    """
+    raw = _env("GB_MCP_CORS_ORIGINS")
+    if not raw:
+        return []
+    if raw == "*":
+        return ["*"]
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def http_transport_requested() -> bool:
+    """True when env asks for Streamable HTTP instead of stdio."""
+    return _env("GB_MCP_TRANSPORT").lower() in _HTTP_TRANSPORTS

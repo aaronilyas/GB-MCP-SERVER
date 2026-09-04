@@ -1,0 +1,32 @@
+# Host MCP process for Streamable HTTP (tools + resources).
+# Isolated ROM validation still uses the root Dockerfile / gb-rom-validator image.
+FROM python:3.12-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        docker.io \
+        libsdl2-2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install --no-cache-dir -r /app/requirements.txt
+
+COPY db.py server.py /app/
+COPY gb_mcp /app/gb_mcp
+COPY docker /app/docker
+COPY Dockerfile /app/Dockerfile
+COPY .dockerignore /app/.dockerignore
+
+RUN mkdir -p /app/roms && touch /app/user_subdirectories.sqlite3
+
+ENV GB_MCP_HOST=0.0.0.0 \
+    GB_MCP_PORT=8080 \
+    GB_MCP_PATH=/mcp \
+    GB_PYBOY_WINDOW=null \
+    PYTHONUNBUFFERED=1
+
+EXPOSE 8080
+
+CMD ["python", "server.py", "--http"]
