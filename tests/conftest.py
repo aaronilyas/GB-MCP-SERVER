@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 
 import db
 from gb_mcp import config
+from gb_mcp.emulator.backend import FakeInstanceBackend
 from gb_mcp.emulator.session import SessionManager
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -138,10 +139,13 @@ class FakePyBoy:
 
 @pytest.fixture
 def pyboy_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[SessionManager]:
-    """Install a FakePyBoy session manager for the duration of a test."""
+    """Install a fake play-instance backend (no Docker, no real PyBoy)."""
     from gb_mcp.emulator import session as pyboy_sessions
 
-    manager = SessionManager(pyboy_factory=FakePyBoy, idle_timeout_seconds=30)
+    manager = SessionManager(
+        backend=FakeInstanceBackend(FakePyBoy),
+        idle_timeout_seconds=30,
+    )
     monkeypatch.setattr(pyboy_sessions, "manager", manager)
     yield manager
     manager.shutdown()

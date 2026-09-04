@@ -1,0 +1,101 @@
+# Game Boy MCP HTTP server. Play and ROM validation are sibling containers
+# created through the mounted Docker socket (not Docker-in-Docker).
+#
+#   docker compose up --build          # long-lived MCP only
+#   docker compose --profile tunnel up # MCP + cloudflared to the MCP port
+#
+# Validator and instance images are built as one-shot services so they exist
+# for `docker run`; they are not published and do not stay running.
+#
+# Before first up:
+#   touch user_subdirectories.sqlite3
+# Optional tunnel:
+#   cp .env.example .env   # TUNNEL_TOKEN, GB_MCP_PUBLIC_URL, GB_MCP_BEARER_TOKEN
+
+name: gb-mcp
+
+networks:
+  mcp:
+    driver: bridge
+
+services:
+  gb-rom-validator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: gb-rom-validator:latest
+    command: ["true"]
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  gb-pyboy-instance:
+    build:
+      context: .
+      dockerfile: Dockerfile.instance
+    image: gb-pyboy-instance:latest
+    command: ["true"]
+    network_mode: none
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt:
+      - no-new-privileges:true
+    restart: "no"
+
+  gb-mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    image: gb-mcp-server:latest
+    command: ["python", "server.py", "--http"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      GB_MCP_HOST: ${GB_MCP_HOST:-0.0.0.0}
+      GB_MCP_PORT: ${GB_MCP_PORT:-8080}
+      GB_MCP_PATH: ${GB_MCP_PATH:-/mcp}
+      GB_MCP_PUBLIC_URL: ${GB_MCP_PUBLIC_URL:-}
+      GB_MCP_BEARER_TOKEN: ${GB_MCP_BEARER_TOKEN:-}
+      GB_MCP_JWT_SECRET: ${GB_MCP_JWT_SECRET:-}
+      GB_MCP_CORS_ORIGINS: ${GB_MCP_CORS_ORIGINS:-}
+      GB_PYBOY_WINDOW: ${GB_PYBOY_WINDOW:-null}
+      GB_ROM_VALIDATOR_IMAGE: ${GB_ROM_VALIDATOR_IMAGE:-gb-rom-validator:latest}
+      GB_PYBOY_INSTANCE_IMAGE: ${GB_PYBOY_INSTANCE_IMAGE:-gb-pyboy-instance:latest}
+      # Docker daemon bind path for sibling play/validator containers.
+      GB_ROMS_HOST_PATH: ${GB_ROMS_HOST_PATH:-${PWD}/roms}
+    volumes:
+      - ${PWD}/roms:/app/roms
+      # Host file must exist (otherwise Docker creates a directory here):
+      #   touch user_subdirectories.sqlite3
+      - ${PWD}/user_subdirectories.sqlite3:/app/user_subdirectories.sqlite3
+      # Sibling containers (validator + play instances). Not Docker-in-Docker.
+      - /var/run/docker.sock:/var/run/docker.sock
+    expose:
+      - "8080"
+    # Optional local debug (not required for the tunnel):
+    # ports:
+    #   - "8080:8080"
+    networks:
+      - mcp
+    depends_on:
+      gb-rom-validator:
+        condition: service_completed_successfully
+      gb-pyboy-instance:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  cloudflared:
+    profiles: ["tunnel"]
+    image: cloudflare/cloudflared:latest
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
+    depends_on:
+      - gb-mcp-server
+    networks:
+      - mcp
+    restart: unless-stopped

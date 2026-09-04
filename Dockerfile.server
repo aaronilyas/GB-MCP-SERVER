@@ -1,23 +1,26 @@
 # Host MCP process for Streamable HTTP (tools + resources).
-# Isolated ROM validation still uses the root Dockerfile / gb-rom-validator image.
+# Isolated ROM validation uses Dockerfile / gb-rom-validator.
+# Play uses Dockerfile.instance / gb-pyboy-instance via the mounted docker.sock
+# (sibling containers, not Docker-in-Docker).
 FROM python:3.12-bookworm
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         docker.io \
-        libsdl2-2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
+COPY requirements-server.txt /app/requirements-server.txt
+RUN pip install --no-cache-dir -r /app/requirements-server.txt
 
 COPY db.py server.py /app/
 COPY gb_mcp /app/gb_mcp
 COPY docker /app/docker
 COPY Dockerfile /app/Dockerfile
+COPY Dockerfile.instance /app/Dockerfile.instance
 COPY .dockerignore /app/.dockerignore
+COPY requirements-instance.txt /app/requirements-instance.txt
 
 RUN mkdir -p /app/roms && touch /app/user_subdirectories.sqlite3
 

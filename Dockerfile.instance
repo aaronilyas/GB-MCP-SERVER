@@ -1,0 +1,29 @@
+# One headless PyBoy per ROM subdirectory (`gb-play-<32hex>`).
+# Started by the MCP process via the Docker daemon. --network=none; no docker.sock.
+FROM python:3.12-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libsdl2-2.0-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 10001 --shell /usr/sbin/nologin pyboy
+
+WORKDIR /app
+
+COPY requirements-instance.txt /app/requirements-instance.txt
+RUN pip install --no-cache-dir -r /app/requirements-instance.txt
+
+COPY gb_mcp /app/gb_mcp
+COPY docker/instance_server.py /opt/instance/server.py
+RUN chmod 755 /opt/instance/server.py
+
+USER pyboy
+WORKDIR /work
+
+ENV GB_PYBOY_WINDOW=null \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/app
+
+# Loopback HTTP only; MCP reaches it with `docker exec`, not published ports.
+CMD ["python", "/opt/instance/server.py"]

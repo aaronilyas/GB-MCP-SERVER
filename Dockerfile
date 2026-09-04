@@ -1,5 +1,6 @@
-# Isolated Game Boy ROM validator image.
+# Isolated Game Boy ROM validator image (`gb-rom-validator`).
 # Built for --network=none / --read-only / --cap-drop=ALL runs from the MCP tool.
+# The MCP host streams the ROM on stdin to docker/validate_gb_rom.py, then rm -f.
 FROM python:3.12-slim-bookworm
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin validator \
@@ -13,5 +14,5 @@ USER validator
 WORKDIR /work
 
 # No ENTRYPOINT that auto-runs; the MCP host starts the container empty,
-# copies the candidate ROM in, then execs the validator.
+# streams the candidate ROM on stdin, then execs the validator.
 CMD ["sleep", "infinity"]

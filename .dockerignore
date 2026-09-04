@@ -1,5 +1,5 @@
-# Shared by the validator image (Dockerfile) and the HTTP MCP image
-# (Dockerfile.server). Keep secrets, venv, and ROM binaries out of the context.
+# Shared by the validator, instance, and HTTP MCP images.
+# Keep secrets, venv, and ROM binaries out of the context.
 .git
 .venv
 __pycache__

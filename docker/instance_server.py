@@ -1,0 +1,180 @@
+#!/usr/bin/env python3
+"""Headless PyBoy control plane for the `gb-pyboy-instance` image.
+
+Listens on 127.0.0.1 only. The MCP host reaches this process with
+`docker exec` — instances run `--network=none` with no published ports.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+
+from gb_mcp.emulator.loop import (
+    INPUT_COMMAND_TIMEOUT_SECONDS,
+    EmulatorSession,
+    _default_pyboy_factory,
+)
+
+LISTEN_HOST = "127.0.0.1"
+LISTEN_PORT = int(os.environ.get("GB_INSTANCE_PORT", "8080"))
+RPC_URL = f"http://{LISTEN_HOST}:{LISTEN_PORT}"
+
+
+class _State:
+    session: EmulatorSession | None = None
+    ready = False
+    httpd: ThreadingHTTPServer | None = None
+
+
+STATE = _State()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        if self.path == "/health":
+            session = STATE.session
+            self._send_json(
+                {
+                    "ready": bool(STATE.ready and session is not None and session.is_running),
+                }
+            )
+            return
+        if self.path == "/status":
+            session = STATE.session
+            if session is None:
+                self._send_json({"running": False, "error": "Play instance is no longer running"}, 503)
+                return
+            self._send_json(session.status())
+            return
+        self._send_json({"error": "not found"}, 404)
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0") or "0")
+        raw = self.rfile.read(length) if length > 0 else b"{}"
+        try:
+            body = json.loads(raw.decode() or "{}")
+        except json.JSONDecodeError:
+            self._send_json({"error": "invalid JSON"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._send_json({"error": "invalid JSON"}, 400)
+            return
+        session = STATE.session
+        if session is None or not session.is_running:
+            self._send_json({"error": "Play instance is no longer running"}, 503)
+            return
+        if self.path == "/input":
+            try:
+                result = session.submit(
+                    "input",
+                    timeout=INPUT_COMMAND_TIMEOUT_SECONDS,
+                    steps=body.get("steps") or [],
+                    screenshot_mode=body.get("screenshot_mode") or "final",
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"sent": False, "error": str(exc)}, 400)
+                return
+            pngs = result.pop("pngs", [])
+            result["pngs_b64"] = [base64.b64encode(png).decode("ascii") for png in pngs]
+            self._send_json(result)
+            return
+        if self.path == "/stop":
+            reason = str(body.get("reason") or "requested")
+            session.request_stop(reason)
+            session.join(timeout=15)
+            self._send_json(session.status(stopped=True))
+            return
+        self._send_json({"error": "not found"}, 404)
+
+    def _send_json(self, payload: dict[str, Any], status: int = 200) -> None:
+        data = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def _rpc_cli(method: str, path: str) -> int:
+    body = sys.stdin.buffer.read() if method.upper() != "GET" else b""
+    req = urllib.request.Request(
+        f"{RPC_URL}{path}",
+        data=body or None,
+        method=method.upper(),
+    )
+    if body:
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Content-Length", str(len(body)))
+    try:
+        with urllib.request.urlopen(req, timeout=INPUT_COMMAND_TIMEOUT_SECONDS + 10) as resp:
+            sys.stdout.buffer.write(resp.read())
+            return 0
+    except urllib.error.HTTPError as exc:
+        sys.stdout.buffer.write(exc.read())
+        return 0
+    except Exception:
+        return 2
+
+
+def _exit_code(reason: str | None) -> int:
+    if reason in {"requested", "switched", "shutdown"}:
+        return 2
+    if reason == "error":
+        return 1
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if args[:1] == ["rpc"]:
+        if len(args) < 3:
+            return 2
+        return _rpc_cli(args[1], args[2])
+
+    rom = Path(os.environ.get("GB_INSTANCE_ROM", ""))
+    if not rom.is_file():
+        print(json.dumps({"error": "ROM path is missing"}), file=sys.stderr)
+        return 1
+    subdirectory = os.environ.get("GB_INSTANCE_SUBDIRECTORY", "local")
+    idle = float(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "300"))
+    session = EmulatorSession(
+        email="instance",
+        subdirectory=subdirectory,
+        rom_path=rom,
+        pyboy_factory=_default_pyboy_factory,
+        idle_timeout_seconds=idle,
+    )
+    STATE.session = session
+    session.start()
+    try:
+        session.wait_ready(timeout=30)
+    except Exception:
+        return 1
+    STATE.ready = True
+
+    httpd = ThreadingHTTPServer((LISTEN_HOST, LISTEN_PORT), Handler)
+    STATE.httpd = httpd
+    thread = threading.Thread(target=httpd.serve_forever, name="instance-http", daemon=True)
+    thread.start()
+
+    session.join()
+    time.sleep(0.2)
+    httpd.shutdown()
+    return _exit_code(session.close_reason)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

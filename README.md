@@ -3,13 +3,43 @@
 MCP server that accepts Game Boy / Game Boy Color ROMs from an LLM, validates
 them inside an isolated Docker container, stores accepted files under
 `roms/<32-hex>/`, and maps those directories to the LLM user's **email** in
-SQLite (`user_subdirectories.sqlite3`). Mapped ROMs can be loaded into an
-in-process PyBoy session.
+SQLite (`user_subdirectories.sqlite3`). Mapped ROMs are played in a dedicated
+`gb-pyboy-instance` container per subdirectory.
 
 Email ↔ subdirectory mapping is application identity. It is **not** transport
 authentication. Remote HTTP clients authenticate with a bearer token; tools
 still take `email` arguments after that check succeeds. Do not ask the model
 to type the bearer token (or any password) into a tool.
+
+## Runtime
+
+Three images, one long-lived process:
+
+| Image | Role |
+| --- | --- |
+| `gb-mcp-server` | MCP tools + resources + SQLite. No user ROMs baked in. |
+| `gb-rom-validator` | Throwaway `--network=none` container per `submit_gb_rom` |
+| `gb-pyboy-instance` | One headless PyBoy (`window=null`) per `roms/<32-hex>/` |
+
+The MCP process talks to the **host Docker daemon** (sibling containers). It
+does not run Docker-in-Docker. After MCP itself is containerized, mount
+`/var/run/docker.sock`. Validator and instance containers never get the socket
+and are not published.
+
+`submit_gb_rom` still streams the ROM on stdin into a locked-down validator
+(`network=none`, read-only, `cap-drop=ALL`, then `rm -f`). Logo + header
+checksum are required; file extension is not enough.
+
+Play is **not** in-process. `load_subdirectory_rom` starts or reuses
+`gb-play-<subdir hex>`, mounting only that subdirectory (ROM read-only, `.state`
+read-write). `send_pyboy_input` talks to that container through
+`gb_mcp/emulator` and still returns MCP PNG images. `stop_pyboy` and idle
+timeout write the save to the volume, then remove the container. The next load
+starts a new container and restores `roms/<subdir>/<rom>.state`.
+
+One live session per email. Switching games saves and stops the old instance,
+then starts the new one. A dead instance returns a short tool error, not a
+Docker dump.
 
 ## Tools
 
@@ -18,11 +48,12 @@ to type the bearer token (or any password) into a tool.
 | `submit_gb_rom` | Base64 ROM in; isolated Docker validation; persist on success |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
 | `list_subdirectories_for_email` | List that user's games and header metadata |
-| `load_subdirectory_rom` | Start / resume PyBoy for an owned directory |
+| `load_subdirectory_rom` | Start / resume a play instance for an owned directory |
 | `send_pyboy_input` | Button chords; returns PNG screenshot(s) |
-| `stop_pyboy` | Save and close the session |
+| `stop_pyboy` | Save, then remove the instance container |
 
-Idle sessions auto-save and close after five minutes without button input.
+Idle sessions auto-save to the volume and remove the container after five
+minutes without button input.
 
 ## Resources (read-only)
 
@@ -30,24 +61,62 @@ Idle sessions auto-save and close after five minutes without button input.
 | --- | --- |
 | `gb://users/{email}/roms` | Owned ROM list and game metadata |
 | `gb://users/{email}/roms/{subdirectory}` | Cartridge header metadata for an owned ROM |
-| `gb://users/{email}/session` | Live PyBoy session status for that email |
+| `gb://users/{email}/session` | Live play-instance status for that email |
+
+## Compose
+
+```bash
+touch user_subdirectories.sqlite3
+docker compose up --build
+```
+
+That starts long-lived `gb-mcp-server` and builds `gb-rom-validator` plus
+`gb-pyboy-instance` (those two exit immediately; they exist so `docker run`
+can use the images). MCP is on the compose network at port 8080. Uncomment
+`ports` in `compose.yaml` to debug against `http://127.0.0.1:8080/mcp`.
+
+Volumes (survive MCP restart and instance `rm`):
+
+| Host path | Container path | Contents |
+| --- | --- | --- |
+| `./roms` | `/app/roms` | ROMs + `*.gb.state` / `*.gbc.state` |
+| `./user_subdirectories.sqlite3` | `/app/user_subdirectories.sqlite3` | email ↔ subdirectory map |
+| `/var/run/docker.sock` | `/var/run/docker.sock` | MCP only (sibling validator + play) |
+
+`GB_ROMS_HOST_PATH` is set to `${PWD}/roms` so play instances bind the **host**
+directory, not `/app/roms` inside the MCP container.
+
+Save files live next to the ROM (`roms/<32-hex>/<name>.gb.state`). Stopping or
+idling removes `gb-play-<32-hex>`; the `.state` file stays on the volume. The
+next `load_subdirectory_rom` starts a new container and restores it.
+
+Optional Cloudflare Tunnel (MCP port only; do not publish validators or
+instances):
+
+```bash
+cp .env.example .env   # TUNNEL_TOKEN, GB_MCP_PUBLIC_URL, GB_MCP_BEARER_TOKEN
+docker compose --profile tunnel up --build
+```
+
+No hostname is hard-coded. Apex later is `gb-mcp-server.com`.
 
 ## Local stdio (default)
+
+`python server.py` on the host still works when Docker is up and the same
+three images exist (the process will build validator/instance images on first
+use if they are missing):
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+docker build -t gb-rom-validator:latest .
+docker build -t gb-pyboy-instance:latest -f Dockerfile.instance .
 python server.py
 ```
 
 `python server.py` always uses stdio unless you pass `--http` or set
-`GB_MCP_TRANSPORT=streamable-http`. Build the validator image once so ROM
-submission can run isolated containers:
-
-```bash
-docker build -t gb-rom-validator:latest .
-```
+`GB_MCP_TRANSPORT=streamable-http`.
 
 ## Streamable HTTP
 
@@ -161,22 +230,20 @@ the dashboard after copying `.env.example` to `.env`.
    (JSON above).
 6. Do not use `cloudflared tunnel --url` quick tunnels for MCP streaming.
 
-Compose starts MCP + cloudflared once `TUNNEL_TOKEN` is pasted and
-`GB_MCP_PUBLIC_URL` / `GB_MCP_BEARER_TOKEN` are set:
-
 ```bash
 cp .env.example .env
 touch user_subdirectories.sqlite3
-docker compose up --build
+docker compose --profile tunnel up --build
 ```
 
-`gb-mcp-server` listens on the compose network only (`expose: "8080"`). The
-host firewall does not need 8080 open. Uncomment `ports` in
-`docker-compose.yml` only to debug against `http://127.0.0.1:8080/mcp`.
+`gb-mcp-server` listens on the compose network (`expose: "8080"`). The host
+firewall does not need 8080 open. Uncomment `ports` in `compose.yaml` only to
+debug against `http://127.0.0.1:8080/mcp`.
 
 ## Environment
 
-See `.env.example`. Python reads `GB_MCP_*`. `TUNNEL_TOKEN` and
+See `.env.example`. Python reads `GB_MCP_*`, `GB_ROM_VALIDATOR_IMAGE`,
+`GB_PYBOY_INSTANCE_IMAGE`, and `GB_ROMS_HOST_PATH`. `TUNNEL_TOKEN` and
 `TUNNEL_HOSTNAME` are for Cloudflare / compose only.
 
 ## Tests
@@ -184,3 +251,7 @@ See `.env.example`. Python reads `GB_MCP_*`. `TUNNEL_TOKEN` and
 ```bash
 pytest
 ```
+
+Unit tests use a fake play-instance backend (no Docker). Optional
+`pytest -m docker` runs an integration test when `gb-pyboy-instance:latest`
+is already built and the daemon is up.

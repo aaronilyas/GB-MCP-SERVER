@@ -1,1 +1,1 @@
-"""Persistent PyBoy sessions for mapped ROM subdirectories."""
+"""Play sessions for mapped ROM subdirectories (one instance container each)."""

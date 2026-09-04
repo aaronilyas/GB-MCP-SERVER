@@ -10,11 +10,23 @@ from gb_mcp.gb.constants import MAX_ROM_BYTES
 ROOT = Path(__file__).resolve().parent.parent
 ROMS_DIR = ROOT / "roms"
 DOCKER_IMAGE = os.environ.get("GB_ROM_VALIDATOR_IMAGE", "gb-rom-validator:latest")
+INSTANCE_IMAGE = os.environ.get("GB_PYBOY_INSTANCE_IMAGE", "gb-pyboy-instance:latest")
 # Base64 expands 3 bytes -> 4 chars; reject before decode to bound host memory.
 MAX_ROM_B64_CHARS = (MAX_ROM_BYTES + 2) // 3 * 4
 # Close a PyBoy session after this many seconds with no model button input.
 IDLE_TIMEOUT_SECONDS = int(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "300"))
 PYBOY_WINDOW = os.environ.get("GB_PYBOY_WINDOW", "null")
+
+
+def roms_host_path() -> Path:
+    """Directory the Docker daemon should bind for `roms/`.
+
+    Inside `gb-mcp-server` this is the host path (`GB_ROMS_HOST_PATH`) so
+    sibling play/validator containers mount the real directory, not `/app/roms`.
+    On a host `python server.py` run it is `ROMS_DIR`.
+    """
+    raw = os.environ.get("GB_ROMS_HOST_PATH", "").strip()
+    return Path(raw) if raw else ROMS_DIR
 
 _HTTP_TRANSPORTS = frozenset({"http", "streamable-http", "streamable_http"})
 

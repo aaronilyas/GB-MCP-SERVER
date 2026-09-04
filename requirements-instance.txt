@@ -1,0 +1,7 @@
+# Runtime deps for the gb-pyboy-instance image (headless PyBoy).
+numpy==2.5.2
+opencv-python==5.0.0.93
+pillow==11.3.0
+pyboy==2.7.0
+PySDL2==0.9.17
+pysdl2-dll==2.32.10
