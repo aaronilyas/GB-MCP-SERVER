@@ -1,7 +1,9 @@
 # Game Boy MCP HTTP server. Play and ROM validation are sibling containers
 # created through the mounted Docker socket (not Docker-in-Docker).
 #
-#   docker compose up --build          # long-lived MCP only
+#   ./start.sh                         # long-lived MCP (detached)
+#   ./stop.sh                          # save play instances, then compose down
+#   docker compose up --build          # long-lived MCP only (foreground)
 #   docker compose --profile tunnel up # MCP + cloudflared to the MCP port
 #
 # Validator and instance images are built as one-shot services so they exist

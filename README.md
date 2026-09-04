@@ -67,14 +67,32 @@ minutes without button input.
 ## Compose
 
 ```bash
+./start.sh
+./stop.sh
+```
+
+`./start.sh` creates `user_subdirectories.sqlite3` if needed, builds the three
+images, and starts long-lived `gb-mcp-server` in the background. HTTP mode
+requires `GB_MCP_BEARER_TOKEN` or `GB_MCP_JWT_SECRET` in `.env` or the
+environment. A non-empty `TUNNEL_TOKEN` (or `./start.sh --tunnel`) also starts
+cloudflared. `./stop.sh` asks running `gb-play-*` instances to write their
+`.state` files, removes leftover validator containers, then takes the compose
+stack down. ROMs, save states, and the SQLite map stay on disk.
+
+Equivalent compose commands:
+
+```bash
 touch user_subdirectories.sqlite3
-docker compose up --build
+docker compose up --build -d
+docker compose --profile tunnel down
 ```
 
 That starts long-lived `gb-mcp-server` and builds `gb-rom-validator` plus
 `gb-pyboy-instance` (those two exit immediately; they exist so `docker run`
 can use the images). MCP is on the compose network at port 8080. Uncomment
 `ports` in `compose.yaml` to debug against `http://127.0.0.1:8080/mcp`.
+Play instances are sibling containers, not compose services — `./stop.sh`
+saves and removes them; `docker compose down` alone does not.
 
 Volumes (survive MCP restart and instance `rm`):
 
@@ -232,8 +250,8 @@ hard-coded in source. Finish these steps in the dashboard after copying
 
 ```bash
 cp .env.example .env
-touch user_subdirectories.sqlite3
-docker compose --profile tunnel up --build
+# set TUNNEL_TOKEN and GB_MCP_BEARER_TOKEN (or GB_MCP_JWT_SECRET)
+./start.sh --tunnel
 ```
 
 ## Environment
