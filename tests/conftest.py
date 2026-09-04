@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from PIL import Image as PILImage
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 
@@ -55,6 +56,17 @@ def roms_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return roms
 
 
+class FakeScreen:
+    """Minimal pyboy.screen stand-in with a unique PIL image per capture."""
+
+    def __init__(self, emu: FakePyBoy) -> None:
+        self._emu = emu
+
+    @property
+    def image(self) -> PILImage.Image:
+        return self._emu._make_image()
+
+
 class FakePyBoy:
     """Stand-in for PyBoy so session tests do not start a real emulator."""
 
@@ -62,11 +74,16 @@ class FakePyBoy:
         self.gamerom = str(rom_path)
         self.cartridge_title = "TESTGAME"
         self.buttons: list[tuple[str, int]] = []
+        self.tick_calls: list[int] = []
+        self.captures: list[int] = []
         self.ticks = 0
         self.stopped = False
         self.saved_ram = False
         self.speed: int | None = None
         self.loaded_state: bytes | None = None
+        self.screen = FakeScreen(self)
+        self._pressed: set[str] = set()
+        self._releases: list[list[object]] = []
         self._dead = threading.Event()
 
     def set_emulation_speed(self, speed: int) -> None:
@@ -74,6 +91,8 @@ class FakePyBoy:
 
     def button(self, name: str, delay: int = 1) -> None:
         self.buttons.append((name, delay))
+        self._pressed.add(name)
+        self._releases.append([name, delay])
 
     def save_state(self, fh) -> None:
         fh.write(b"FAKESTATE")
@@ -81,17 +100,40 @@ class FakePyBoy:
     def load_state(self, fh) -> None:
         self.loaded_state = fh.read()
 
-    def tick(self, count: int = 1, render: bool = True) -> bool:
+    def tick(self, count: int = 1, render: bool = True, sound: bool = True) -> bool:
         if self._dead.is_set():
             return False
+        self.tick_calls.append(count)
         self._dead.wait(0.01)
-        self.ticks += 1
+        n = count if isinstance(count, int) and count > 0 else 0
+        for _ in range(n):
+            if self._dead.is_set():
+                return False
+            self._advance_buttons()
+            self.ticks += 1
         return not self._dead.is_set()
 
     def stop(self, save: bool = True, ram_file=None, rtc_file=None) -> None:
         self.saved_ram = bool(save)
         self.stopped = True
         self._dead.set()
+
+    def _advance_buttons(self) -> None:
+        still: list[list[object]] = []
+        for name, remaining in self._releases:
+            if not isinstance(remaining, int) or remaining <= 0:
+                self._pressed.discard(str(name))
+                continue
+            still.append([name, remaining - 1])
+        self._releases = still
+
+    def _make_image(self) -> PILImage.Image:
+        # Unique per capture: ticks in RGB, plus a pixel for currently held buttons.
+        color = (self.ticks & 255, (self.ticks >> 8) & 255, 80)
+        image = PILImage.new("RGB", (160, 144), color=color)
+        image.putpixel((0, 0), (self.ticks & 255, len(self._pressed) & 255, 1))
+        self.captures.append(self.ticks)
+        return image
 
 
 @pytest.fixture

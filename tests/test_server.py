@@ -2,14 +2,31 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from typing import Any
 
 import pytest
+from mcp.server.mcpserver.utilities.types import Image
 
 import db
 import server
 from gb_mcp import config
+from gb_mcp.emulator.session import MAX_HOLD_FRAMES, MAX_INPUT_STEPS
 
 from rom_builder import make_rom
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _unwrap_input(result: dict[str, Any] | list[Any]) -> tuple[dict[str, Any], list[Image]]:
+    if isinstance(result, dict):
+        return result, []
+    status, *rest = result
+    assert isinstance(status, dict)
+    images = []
+    for item in rest:
+        assert isinstance(item, Image)
+        images.append(item)
+    return status, images
 
 
 @pytest.fixture
@@ -186,9 +203,14 @@ def test_load_subdirectory_rom_starts_pyboy(isolated_db, roms_dir: Path, pyboy_m
     again = server.load_subdirectory_rom("owner@example.com", name)
     assert again["already_running"] is True
 
-    sent = server.send_pyboy_input("owner@example.com", name, ["A", "Up"], hold_frames=3)
+    sent, images = _unwrap_input(
+        server.send_pyboy_input("owner@example.com", name, ["A", "Up"], hold_frames=3)
+    )
     assert sent["sent"] is True
-    assert sent["buttons"] == ["a", "up"]
+    assert sent["steps"] == [{"buttons": ["a", "up"], "hold_frames": 3, "step_index": 0}]
+    assert sent["screenshot_count"] == 1
+    assert len(images) == 1
+    assert images[0].data is not None and images[0].data.startswith(PNG_MAGIC)
 
     stopped = server.stop_pyboy("owner@example.com", name)
     assert stopped["stopped"] is True
@@ -223,9 +245,163 @@ def test_send_pyboy_input_validates_buttons(isolated_db, roms_dir: Path, pyboy_m
 
 def test_send_pyboy_input_without_session(isolated_db, roms_dir: Path, pyboy_manager) -> None:
     name = _mapped_rom(roms_dir)
-    result = server.send_pyboy_input("owner@example.com", name, ["a"])
+    result, images = _unwrap_input(server.send_pyboy_input("owner@example.com", name, ["a"]))
     assert result["sent"] is False
     assert "no PyBoy session" in result["error"]
+    assert images == []
+
+
+def test_send_pyboy_input_unmapped_email_has_no_images(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir)
+    result, images = _unwrap_input(
+        server.send_pyboy_input("other@example.com", name, ["a"])
+    )
+    assert result["sent"] is False
+    assert "not mapped" in result["error"]
+    assert images == []
+
+
+def test_send_pyboy_input_single_step_returns_one_image(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name)
+    status, images = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com", name, ["a"], screenshot_mode="final"
+        )
+    )
+    assert status["sent"] is True
+    assert status["screenshot_mode"] == "final"
+    assert status["screenshot_count"] == 1
+    assert len(images) == 1
+    assert images[0].data is not None and images[0].data.startswith(PNG_MAGIC)
+    assert images[0].to_image_content().mime_type == "image/png"
+
+
+def test_send_pyboy_input_steps_all_returns_three_images(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name)
+    steps = [
+        {"buttons": ["a"], "hold_frames": 1},
+        {"buttons": ["b"], "hold_frames": 2},
+        {"buttons": ["start"], "hold_frames": 1},
+    ]
+    status, images = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com", name, steps=steps, screenshot_mode="all"
+        )
+    )
+    assert status["sent"] is True
+    assert status["screenshot_count"] == 3
+    assert status["screenshots"] == [
+        {"step_index": 0},
+        {"step_index": 1},
+        {"step_index": 2},
+    ]
+    assert len(images) == 3
+    payloads = []
+    for image in images:
+        assert image.data is not None and image.data.startswith(PNG_MAGIC)
+        payloads.append(image.data)
+    assert payloads[0] != payloads[1] != payloads[2]
+
+
+def test_send_pyboy_input_steps_final_returns_one_image(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name)
+    steps = [
+        {"buttons": ["a"], "hold_frames": 1},
+        {"buttons": ["b"], "hold_frames": 2},
+        {"buttons": ["start"], "hold_frames": 1},
+    ]
+    status, images = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com", name, steps=steps, screenshot_mode="final"
+        )
+    )
+    assert status["sent"] is True
+    assert status["screenshot_count"] == 1
+    assert status["screenshots"] == [{"step_index": 2}]
+    assert len(images) == 1
+    assert images[0].data is not None and images[0].data.startswith(PNG_MAGIC)
+
+
+def test_send_pyboy_input_rejects_invalid_steps(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name)
+
+    empty_steps, empty_images = _unwrap_input(
+        server.send_pyboy_input("owner@example.com", name, steps=[])
+    )
+    assert empty_steps["sent"] is False
+    assert "steps must not be empty" in empty_steps["error"]
+    assert empty_images == []
+
+    empty_in_step, _ = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com", name, steps=[{"buttons": [], "hold_frames": 1}]
+        )
+    )
+    assert empty_in_step["sent"] is False
+    assert "at least one button" in empty_in_step["error"]
+
+    bad_button, _ = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com", name, steps=[{"buttons": ["turbo"]}]
+        )
+    )
+    assert bad_button["sent"] is False
+    assert "invalid button" in bad_button["error"]
+
+    both, both_images = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com",
+            name,
+            ["a"],
+            steps=[{"buttons": ["b"]}],
+        )
+    )
+    assert both["sent"] is False
+    assert "not both" in both["error"]
+    assert both_images == []
+
+    too_many, _ = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com",
+            name,
+            steps=[{"buttons": ["a"]}] * (MAX_INPUT_STEPS + 1),
+        )
+    )
+    assert too_many["sent"] is False
+    assert "steps" in too_many["error"]
+
+    bad_mode, mode_images = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com", name, ["a"], screenshot_mode="none"
+        )
+    )
+    assert bad_mode["sent"] is False
+    assert "screenshot_mode" in bad_mode["error"]
+    assert mode_images == []
+
+    hold, _ = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com",
+            name,
+            steps=[{"buttons": ["a"], "hold_frames": MAX_HOLD_FRAMES + 1}],
+        )
+    )
+    assert hold["sent"] is False
+    assert "hold_frames" in hold["error"]
 
 
 def test_stop_pyboy_without_session(isolated_db, roms_dir: Path, pyboy_manager) -> None:

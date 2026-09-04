@@ -9,6 +9,7 @@ and then closes the instance.
 from __future__ import annotations
 
 import atexit
+import io
 import os
 import tempfile
 import threading
@@ -22,7 +23,29 @@ from gb_mcp.storage.roms import _state_path_for_rom
 
 BUTTONS = frozenset({"a", "b", "start", "select", "up", "down", "left", "right"})
 MAX_HOLD_FRAMES = 120
+MAX_INPUT_STEPS = 30
+SCREENSHOT_MODES = frozenset({"final", "all"})
+# button(name, N) is held for N ticks and released on tick N+1; worst batch is
+# MAX_INPUT_STEPS * (MAX_HOLD_FRAMES + 1) frames at 60 fps, plus PNG encode.
+INPUT_COMMAND_TIMEOUT_SECONDS = (
+    MAX_INPUT_STEPS * (MAX_HOLD_FRAMES + 1)
+) / 60.0 + 30.0
 PyBoyFactory = Callable[[Path], Any]
+
+
+def _png_from_screen(pyboy: Any) -> bytes:
+    """Encode the current PyBoy screen as PNG bytes. Must run on the emulator thread."""
+    screen = getattr(pyboy, "screen", None)
+    image = getattr(screen, "image", None) if screen is not None else None
+    if image is None:
+        raise RuntimeError("PyBoy screen image is unavailable")
+    snapshot = image.copy() if hasattr(image, "copy") else image
+    buf = io.BytesIO()
+    snapshot.save(buf, format="PNG")
+    data = buf.getvalue()
+    if not data:
+        raise RuntimeError("failed to encode PyBoy screenshot")
+    return data
 
 
 def _default_pyboy_factory(rom_path: Path) -> Any:
@@ -185,15 +208,7 @@ class EmulatorSession:
 
     def _handle(self, command: _Command) -> None:
         if command.op == "input":
-            buttons: list[str] = command.payload["buttons"]
-            hold_frames: int = command.payload["hold_frames"]
-            pyboy = self._pyboy
-            if pyboy is None:
-                raise RuntimeError("PyBoy instance is not running")
-            for button in buttons:
-                pyboy.button(button, hold_frames)
-            self._last_input_at = time.monotonic()
-            command.complete({"buttons": buttons, "hold_frames": hold_frames})
+            command.complete(self._apply_input(command.payload))
             return
         if command.op == "stop":
             self.close_reason = command.payload.get("reason", "requested")
@@ -201,6 +216,48 @@ class EmulatorSession:
             command.complete({"stopping": True})
             return
         raise ValueError(f"unknown PyBoy command {command.op!r}")
+
+    def _apply_input(self, payload: dict[str, Any]) -> dict[str, Any]:
+        steps: list[dict[str, Any]] = payload["steps"]
+        screenshot_mode: str = payload["screenshot_mode"]
+        pyboy = self._pyboy
+        if pyboy is None:
+            raise RuntimeError("PyBoy instance is not running")
+        if not steps:
+            raise ValueError("steps must not be empty")
+        if screenshot_mode not in SCREENSHOT_MODES:
+            raise ValueError("screenshot_mode must be 'final' or 'all'")
+
+        pngs: list[bytes] = []
+        ran: list[dict[str, Any]] = []
+        last_index = len(steps) - 1
+        for index, step in enumerate(steps):
+            buttons: list[str] = step["buttons"]
+            hold_frames: int = step["hold_frames"]
+            for button in buttons:
+                pyboy.button(button, hold_frames)
+            # Pressed for hold_frames ticks; released on tick hold_frames + 1.
+            still_running = pyboy.tick(hold_frames + 1, True)
+            if still_running is False:
+                raise RuntimeError("PyBoy session stopped while applying input")
+            ran.append(
+                {"buttons": buttons, "hold_frames": hold_frames, "step_index": index}
+            )
+            if screenshot_mode == "all" or index == last_index:
+                pngs.append(_png_from_screen(pyboy))
+
+        self._last_input_at = time.monotonic()
+        if screenshot_mode == "all":
+            labels = [{"step_index": step["step_index"]} for step in ran]
+        else:
+            labels = [{"step_index": last_index}]
+        return {
+            "steps": ran,
+            "screenshot_mode": screenshot_mode,
+            "screenshot_count": len(pngs),
+            "screenshots": labels,
+            "pngs": pngs,
+        }
 
     def _save(self) -> None:
         pyboy = self._pyboy
@@ -345,14 +402,28 @@ class SessionManager:
         self,
         email: str,
         subdirectory: str,
-        buttons: list[str],
+        buttons: list[str] | None = None,
         hold_frames: int = 1,
+        *,
+        steps: list[dict[str, Any]] | None = None,
+        screenshot_mode: str = "final",
     ) -> dict[str, Any]:
         session = self._require_running(email, subdirectory)
         if isinstance(session, dict):
             return session
+        if steps:
+            payload_steps = steps
+        elif buttons:
+            payload_steps = [{"buttons": buttons, "hold_frames": hold_frames}]
+        else:
+            return session.status(sent=False, error="at least one button is required")
         try:
-            result = session.submit("input", buttons=buttons, hold_frames=hold_frames)
+            result = session.submit(
+                "input",
+                timeout=INPUT_COMMAND_TIMEOUT_SECONDS,
+                steps=payload_steps,
+                screenshot_mode=screenshot_mode,
+            )
         except Exception as exc:  # noqa: BLE001
             return session.status(sent=False, error=str(exc))
         return session.status(sent=True, **result)

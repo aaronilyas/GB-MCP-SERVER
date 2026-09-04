@@ -18,13 +18,19 @@ import re
 from typing import Annotated, Any
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.utilities.types import Image
 from pydantic import Field
 
 import db
 from gb_mcp import config
 from gb_mcp.config import MAX_ROM_B64_CHARS, MAX_ROM_BYTES
 from gb_mcp.emulator import session as pyboy_sessions
-from gb_mcp.emulator.session import BUTTONS, MAX_HOLD_FRAMES
+from gb_mcp.emulator.session import (
+    BUTTONS,
+    MAX_HOLD_FRAMES,
+    MAX_INPUT_STEPS,
+    SCREENSHOT_MODES,
+)
 from gb_mcp.isolation.docker import (
     _create_isolated_container,
     _destroy_container,
@@ -52,8 +58,10 @@ mcp = MCPServer(
         "ROM subdirectories and game metadata with list_subdirectories_for_email. "
         "Load a mapped subdirectory's ROM into PyBoy with load_subdirectory_rom "
         "(email and subdirectory name are both required). Keep the session alive "
-        "by sending buttons with send_pyboy_input; stop it with stop_pyboy. "
-        "Five minutes without button input auto-saves the game and closes PyBoy."
+        "by sending a button chord or a sequence of chords with send_pyboy_input, "
+        "which returns PNG screenshot(s) of the resulting screen; stop it with "
+        "stop_pyboy. Five minutes without button input auto-saves the game and "
+        "closes PyBoy."
     ),
 )
 
@@ -450,14 +458,77 @@ def load_subdirectory_rom(
     return result
 
 
+def _input_error(email: str, subdirectory: str, error: str) -> dict[str, Any]:
+    return {
+        "sent": False,
+        "email": email,
+        "subdirectory": subdirectory,
+        "error": error,
+    }
+
+
+def _normalize_buttons(buttons: Any) -> list[str]:
+    if not isinstance(buttons, list) or not buttons:
+        raise ValueError("at least one button is required")
+    normalized: list[str] = []
+    for button in buttons:
+        if not isinstance(button, str):
+            raise ValueError(
+                f"invalid button {button!r}; expected one of "
+                f"{', '.join(sorted(BUTTONS))}"
+            )
+        value = button.strip().lower()
+        if value not in BUTTONS:
+            raise ValueError(
+                f"invalid button {button!r}; expected one of "
+                f"{', '.join(sorted(BUTTONS))}"
+            )
+        normalized.append(value)
+    return normalized
+
+
+def _normalize_hold_frames(hold_frames: Any) -> int:
+    if not isinstance(hold_frames, int) or hold_frames < 1 or hold_frames > MAX_HOLD_FRAMES:
+        raise ValueError(f"hold_frames must be an integer from 1 to {MAX_HOLD_FRAMES}")
+    return hold_frames
+
+
+def _normalize_steps(steps: list[Any]) -> list[dict[str, Any]]:
+    if not steps:
+        raise ValueError("steps must not be empty")
+    if len(steps) > MAX_INPUT_STEPS:
+        raise ValueError(f"steps cannot exceed {MAX_INPUT_STEPS}")
+    normalized: list[dict[str, Any]] = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(
+                f"step {index}: each step must be an object with a buttons list"
+            )
+        try:
+            buttons = _normalize_buttons(step.get("buttons"))
+            hold_frames = _normalize_hold_frames(step.get("hold_frames", 1))
+        except ValueError as exc:
+            raise ValueError(f"step {index}: {exc}") from exc
+        normalized.append({"buttons": buttons, "hold_frames": hold_frames})
+    return normalized
+
+
 @mcp.tool(
     name="send_pyboy_input",
     description=(
-        "Send Game Boy button input to a running PyBoy session. Both the LLM "
-        "user's email and the 32-character subdirectory name are required. "
-        "Valid buttons: a, b, start, select, up, down, left, right. Any "
-        "successful call resets the 5-minute idle timer. After 5 minutes "
-        "with no input the session auto-saves and PyBoy closes."
+        "Send Game Boy button input to a running PyBoy session and return PNG "
+        "screenshot(s) of the resulting screen. Both the LLM user's email and "
+        "the 32-character subdirectory name are required. Pass either a single "
+        "chord as buttons (optional hold_frames), or an ordered steps list of "
+        "chords to run one after another in this call — the length of steps is "
+        "how many inputs run before screenshots come back. Do not pass both a "
+        "non-empty buttons list and a non-empty steps list. screenshot_mode "
+        "'final' (default) returns one PNG after all steps; 'all' returns one "
+        "PNG after each step, in order. Valid buttons: a, b, start, select, "
+        f"up, down, left, right. At most {MAX_INPUT_STEPS} steps; hold_frames "
+        f"is 1..{MAX_HOLD_FRAMES}. Any successful call resets the 5-minute idle "
+        "timer. After 5 minutes with no input the session auto-saves and PyBoy "
+        "closes."
     ),
 )
 def send_pyboy_input(
@@ -480,74 +551,111 @@ def send_pyboy_input(
         ),
     ],
     buttons: Annotated[
-        list[str],
+        list[str] | None,
         Field(
+            default=None,
             description=(
-                "Game Boy buttons to press together this step. Each value must "
-                "be one of: a, b, start, select, up, down, left, right."
-            )
+                "Single-step Game Boy buttons to press together. Each value must "
+                "be one of: a, b, start, select, up, down, left, right. Omit when "
+                "passing steps. Cannot be combined with a non-empty steps list."
+            ),
         ),
-    ],
+    ] = None,
     hold_frames: Annotated[
         int,
         Field(
             default=1,
             description=(
-                "How many emulator frames to hold the buttons before release. "
-                f"Must be between 1 and {MAX_HOLD_FRAMES}."
+                "How many emulator frames to hold the top-level buttons before "
+                f"release. Must be between 1 and {MAX_HOLD_FRAMES}. Ignored when "
+                "using steps (each step has its own hold_frames)."
             ),
         ),
     ] = 1,
-) -> dict[str, Any]:
-    """Press buttons on a running PyBoy session and reset the idle timer."""
+    steps: Annotated[
+        list[dict[str, Any]] | None,
+        Field(
+            default=None,
+            description=(
+                "Ordered input steps to apply sequentially in this call. Each "
+                "step is an object with 'buttons' (non-empty list of Game Boy "
+                "buttons pressed together) and optional 'hold_frames' (default 1, "
+                f"max {MAX_HOLD_FRAMES}). At most {MAX_INPUT_STEPS} steps. The "
+                "length of this list is how many inputs run before screenshots "
+                "are returned. Do not pass this together with a non-empty "
+                "top-level buttons list."
+            ),
+        ),
+    ] = None,
+    screenshot_mode: Annotated[
+        str,
+        Field(
+            default="final",
+            description=(
+                "Which screenshots to return. 'final' (default): one PNG after "
+                "all steps. 'all': one PNG after each step, in order."
+            ),
+        ),
+    ] = "final",
+) -> list[dict[str, Any] | Image] | dict[str, Any]:
+    """Press buttons on a running PyBoy session, capture the screen, reset idle."""
     resolved = _owned_subdirectory(email, subdirectory)
     if isinstance(resolved, dict):
         resolved["sent"] = False
         return resolved
 
     normalized_email, name = resolved
-    if not buttons:
-        return {
-            "sent": False,
-            "email": normalized_email,
-            "subdirectory": name,
-            "error": "at least one button is required",
-        }
+    mode = screenshot_mode.strip().lower() if isinstance(screenshot_mode, str) else screenshot_mode
+    if mode not in SCREENSHOT_MODES:
+        return _input_error(
+            normalized_email,
+            name,
+            "screenshot_mode must be 'final' or 'all'",
+        )
 
-    normalized_buttons: list[str] = []
-    for button in buttons:
-        value = button.strip().lower()
-        if value not in BUTTONS:
-            return {
-                "sent": False,
-                "email": normalized_email,
-                "subdirectory": name,
-                "error": (
-                    f"invalid button {button!r}; expected one of "
-                    f"{', '.join(sorted(BUTTONS))}"
-                ),
-            }
-        normalized_buttons.append(value)
-
-    if not isinstance(hold_frames, int) or hold_frames < 1 or hold_frames > MAX_HOLD_FRAMES:
-        return {
-            "sent": False,
-            "email": normalized_email,
-            "subdirectory": name,
-            "error": f"hold_frames must be an integer from 1 to {MAX_HOLD_FRAMES}",
-        }
+    has_buttons = bool(buttons)
+    try:
+        if steps is not None:
+            if has_buttons and len(steps) > 0:
+                return _input_error(
+                    normalized_email,
+                    name,
+                    "provide either top-level buttons or steps, not both",
+                )
+            payload_steps = _normalize_steps(steps)
+        elif has_buttons:
+            payload_steps = [
+                {
+                    "buttons": _normalize_buttons(buttons),
+                    "hold_frames": _normalize_hold_frames(hold_frames),
+                }
+            ]
+        else:
+            return _input_error(
+                normalized_email,
+                name,
+                "at least one button is required",
+            )
+    except ValueError as exc:
+        return _input_error(normalized_email, name, str(exc))
 
     try:
-        return pyboy_sessions.manager.send_input(
-            normalized_email, name, normalized_buttons, hold_frames
+        result = pyboy_sessions.manager.send_input(
+            normalized_email,
+            name,
+            steps=payload_steps,
+            screenshot_mode=mode,
         )
     except Exception as exc:  # noqa: BLE001
-        return {
-            "sent": False,
-            "email": normalized_email,
-            "subdirectory": name,
-            "error": str(exc),
-        }
+        return _input_error(normalized_email, name, str(exc))
+
+    if not result.get("sent"):
+        result.pop("pngs", None)
+        return result
+
+    pngs = result.pop("pngs", [])
+    images = [Image(data=png, format="png") for png in pngs]
+    return [result, *images]
 
 
 @mcp.tool(

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import io
 import time
 from pathlib import Path
+
+from PIL import Image as PILImage
 
 import db
 from gb_mcp.emulator.session import SessionManager
@@ -9,6 +12,15 @@ from gb_mcp.storage.roms import _state_path_for_rom
 
 from conftest import FakePyBoy
 from rom_builder import make_rom
+
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+
+def _assert_png(data: bytes) -> PILImage.Image:
+    assert data.startswith(PNG_MAGIC)
+    image = PILImage.open(io.BytesIO(data))
+    image.load()
+    return image
 
 
 def _write_mapped_rom(
@@ -41,8 +53,12 @@ def test_load_starts_session_and_stop_saves(
 
     sent = pyboy_manager.send_input("owner@example.com", name, ["a", "start"], hold_frames=4)
     assert sent["sent"] is True
-    assert sent["buttons"] == ["a", "start"]
+    assert sent["steps"] == [{"buttons": ["a", "start"], "hold_frames": 4, "step_index": 0}]
+    assert sent["screenshot_mode"] == "final"
+    assert sent["screenshot_count"] == 1
     assert session._pyboy.buttons == [("a", 4), ("start", 4)]
+    assert len(sent["pngs"]) == 1
+    _assert_png(sent["pngs"][0])
 
     stopped = pyboy_manager.stop("owner@example.com", name)
     assert stopped["stopped"] is True
@@ -163,6 +179,11 @@ def test_real_pyboy_load_input_stop_saves(isolated_db, roms_dir: Path) -> None:
         assert result["cartridge_title"] == "TESTGAME"
         sent = manager.send_input("owner@example.com", name, ["a"])
         assert sent["sent"] is True
+        assert sent["screenshot_count"] == 1
+        png = sent["pngs"][0]
+        image = _assert_png(png)
+        assert image.size[0] >= 160
+        assert image.size[1] >= 144
         stopped = manager.stop("owner@example.com", name)
         assert stopped["stopped"] is True
         assert stopped["saved"] is True
@@ -180,3 +201,157 @@ def test_stop_wrong_subdirectory(
     result = pyboy_manager.stop("owner@example.com", other)
     assert result["stopped"] is False
     assert "not" in result["error"]
+
+
+_THREE_STEPS = [
+    {"buttons": ["a"], "hold_frames": 1},
+    {"buttons": ["b", "right"], "hold_frames": 2},
+    {"buttons": ["start"], "hold_frames": 3},
+]
+
+
+def test_send_input_single_step_returns_one_png(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    pyboy_manager.load("owner@example.com", name, rom_path)
+    sent = pyboy_manager.send_input(
+        "owner@example.com", name, ["a"], screenshot_mode="final"
+    )
+    assert sent["sent"] is True
+    assert sent["screenshot_mode"] == "final"
+    assert sent["screenshot_count"] == 1
+    assert sent["screenshots"] == [{"step_index": 0}]
+    assert len(sent["pngs"]) == 1
+    _assert_png(sent["pngs"][0])
+
+
+def test_send_input_steps_all_returns_one_png_per_step(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    pyboy_manager.load("owner@example.com", name, rom_path)
+    session = pyboy_manager.get("owner@example.com")
+    assert session is not None
+    pyboy = session._pyboy
+
+    sent = pyboy_manager.send_input(
+        "owner@example.com",
+        name,
+        steps=_THREE_STEPS,
+        screenshot_mode="all",
+    )
+    assert sent["sent"] is True
+    assert sent["screenshot_count"] == 3
+    assert sent["screenshots"] == [
+        {"step_index": 0},
+        {"step_index": 1},
+        {"step_index": 2},
+    ]
+    assert len(sent["pngs"]) == 3
+    images = [_assert_png(png) for png in sent["pngs"]]
+    assert sent["pngs"][0] != sent["pngs"][1] != sent["pngs"][2]
+    assert images[0].tobytes() != images[1].tobytes() != images[2].tobytes()
+    assert pyboy.captures[-3:] == sorted(pyboy.captures[-3:])
+    assert pyboy.captures[-3] < pyboy.captures[-2] < pyboy.captures[-1]
+
+
+def test_send_input_steps_final_returns_last_png_only(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    pyboy_manager.load("owner@example.com", name, rom_path)
+    sent = pyboy_manager.send_input(
+        "owner@example.com",
+        name,
+        steps=_THREE_STEPS,
+        screenshot_mode="final",
+    )
+    assert sent["sent"] is True
+    assert sent["screenshot_count"] == 1
+    assert sent["screenshots"] == [{"step_index": 2}]
+    assert len(sent["pngs"]) == 1
+    _assert_png(sent["pngs"][0])
+
+
+def test_send_input_applies_steps_in_order(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    pyboy_manager.load("owner@example.com", name, rom_path)
+    session = pyboy_manager.get("owner@example.com")
+    assert session is not None
+    pyboy = session._pyboy
+
+    sent = pyboy_manager.send_input(
+        "owner@example.com",
+        name,
+        steps=_THREE_STEPS,
+        screenshot_mode="all",
+    )
+    assert sent["sent"] is True
+    assert pyboy.buttons == [("a", 1), ("b", 2), ("right", 2), ("start", 3)]
+    assert [count for count in pyboy.tick_calls if count > 1] == [2, 3, 4]
+    assert sent["steps"] == [
+        {"buttons": ["a"], "hold_frames": 1, "step_index": 0},
+        {"buttons": ["b", "right"], "hold_frames": 2, "step_index": 1},
+        {"buttons": ["start"], "hold_frames": 3, "step_index": 2},
+    ]
+
+
+def test_batch_input_resets_idle_timer_once(isolated_db, roms_dir: Path) -> None:
+    manager = SessionManager(pyboy_factory=FakePyBoy, idle_timeout_seconds=0.25)
+    try:
+        name, rom_path = _write_mapped_rom(roms_dir)
+        manager.load("owner@example.com", name, rom_path)
+        time.sleep(0.12)
+        sent = manager.send_input(
+            "owner@example.com",
+            name,
+            steps=_THREE_STEPS,
+            screenshot_mode="final",
+        )
+        assert sent["sent"] is True
+        time.sleep(0.12)
+        session = manager.get("owner@example.com")
+        assert session is not None
+        assert session.is_running is True
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            if not session.is_running:
+                break
+            time.sleep(0.02)
+        assert session.is_running is False
+        assert session.close_reason == "idle_timeout"
+    finally:
+        manager.shutdown()
+
+
+def test_input_fails_without_partial_pngs_if_emulator_stops(
+    isolated_db, roms_dir: Path
+) -> None:
+    class StoppingPyBoy(FakePyBoy):
+        def tick(self, count: int = 1, render: bool = True, sound: bool = True) -> bool:
+            if count > 1:
+                self._input_batches = getattr(self, "_input_batches", 0) + 1
+                if self._input_batches >= 2:
+                    super().tick(count, render, sound)
+                    self._dead.set()
+                    return False
+            return super().tick(count, render, sound)
+
+    manager = SessionManager(pyboy_factory=StoppingPyBoy, idle_timeout_seconds=30)
+    try:
+        name, rom_path = _write_mapped_rom(roms_dir)
+        manager.load("owner@example.com", name, rom_path)
+        sent = manager.send_input(
+            "owner@example.com",
+            name,
+            steps=_THREE_STEPS,
+            screenshot_mode="all",
+        )
+        assert sent["sent"] is False
+        assert "stopped" in sent["error"]
+        assert "pngs" not in sent
+    finally:
+        manager.shutdown()
