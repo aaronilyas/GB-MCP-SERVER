@@ -1,7 +1,7 @@
 # Example cloudflared ingress for the Game Boy MCP HTTP server.
 #
 # Copy to config.yml and replace ${TUNNEL_HOSTNAME} with the public hostname
-# of your *named* Cloudflare Tunnel (for example gb.yourdomain.com).
+# of your *named* Cloudflare Tunnel (gb-mcp-server.com).
 # cloudflared does not expand this placeholder; a human must substitute it.
 #
 # When docker compose uses TUNNEL_TOKEN, Zero Trust owns the public hostname

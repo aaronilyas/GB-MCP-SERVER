@@ -17,6 +17,7 @@ from gb_mcp.emulator.backend import (
     InstanceBackend,
     InstanceDeadError,
     InstanceHandle,
+    _dead_message,
 )
 from gb_mcp.emulator.loop import (
     BUTTONS,
@@ -24,7 +25,6 @@ from gb_mcp.emulator.loop import (
     MAX_HOLD_FRAMES,
     MAX_INPUT_STEPS,
     SCREENSHOT_MODES,
-    EmulatorSession,
     PyBoyFactory,
 )
 
@@ -120,23 +120,19 @@ class PlaySession:
     def status(self, **extra: Any) -> dict[str, Any]:
         try:
             payload = self._backend.status(self._handle)
-        except InstanceDeadError as exc:
+        except Exception as exc:
             self._mark_dead()
+            error = (
+                str(exc)
+                if isinstance(exc, InstanceDeadError)
+                else "Play instance is no longer running"
+            )
             payload = {
                 "email": self.email,
                 "subdirectory": self.subdirectory,
                 "rom": self.rom_path.name,
                 "running": False,
-                "error": str(exc),
-            }
-        except Exception:
-            self._mark_dead()
-            payload = {
-                "email": self.email,
-                "subdirectory": self.subdirectory,
-                "rom": self.rom_path.name,
-                "running": False,
-                "error": "Play instance is no longer running",
+                "error": error,
             }
         payload.setdefault("email", self.email)
         payload.setdefault("subdirectory", self.subdirectory)
@@ -359,13 +355,12 @@ class SessionManager:
         if session is None or not session.is_running:
             reason = None if session is None else session.close_reason
             error = "no PyBoy session is running for this email"
-            if reason == "idle_timeout":
-                error = (
-                    "PyBoy session closed after idle timeout; call load_subdirectory_rom "
-                    "to start it again"
-                )
-            elif reason in {"instance_exited", "error", "emulator_stopped"}:
-                error = "Play instance is no longer running"
+            if reason == "idle_timeout" or reason in {
+                "instance_exited",
+                "error",
+                "emulator_stopped",
+            }:
+                error = _dead_message(reason)
             return {
                 "sent": False,
                 "email": email,
@@ -394,15 +389,6 @@ class SessionManager:
             if session.is_running:
                 session.request_stop(reason="shutdown")
                 session.join(timeout=15)
-
-
-def _dead_message(reason: str | None) -> str:
-    if reason == "idle_timeout":
-        return (
-            "PyBoy session closed after idle timeout; call load_subdirectory_rom "
-            "to start it again"
-        )
-    return "Play instance is no longer running"
 
 
 def _tool_error(exc: BaseException) -> str:

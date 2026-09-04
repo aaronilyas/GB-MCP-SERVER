@@ -90,21 +90,13 @@ Save files live next to the ROM (`roms/<32-hex>/<name>.gb.state`). Stopping or
 idling removes `gb-play-<32-hex>`; the `.state` file stays on the volume. The
 next `load_subdirectory_rom` starts a new container and restores it.
 
-Optional Cloudflare Tunnel (MCP port only; do not publish validators or
-instances):
-
-```bash
-cp .env.example .env   # TUNNEL_TOKEN, GB_MCP_PUBLIC_URL, GB_MCP_BEARER_TOKEN
-docker compose --profile tunnel up --build
-```
-
-No hostname is hard-coded. Apex later is `gb-mcp-server.com`.
-
-## Local stdio (default)
+## Local stdio
 
 `python server.py` on the host still works when Docker is up and the same
-three images exist (the process will build validator/instance images on first
-use if they are missing):
+three images exist. Host/dev Python deps are `requirements.txt` (includes
+pytest plus the two image pin files). The MCP image uses
+`requirements-server.txt`; the play-instance image uses
+`requirements-instance.txt`.
 
 ```bash
 python -m venv .venv
@@ -114,6 +106,10 @@ docker build -t gb-rom-validator:latest .
 docker build -t gb-pyboy-instance:latest -f Dockerfile.instance .
 python server.py
 ```
+
+If those images are missing and the Dockerfiles are on disk, the process will
+build them on first use. Prefer the compose-built images when running MCP in
+a container.
 
 `python server.py` always uses stdio unless you pass `--http` or set
 `GB_MCP_TRANSPORT=streamable-http`.
@@ -125,8 +121,8 @@ export GB_MCP_HOST=0.0.0.0
 export GB_MCP_PORT=8080
 export GB_MCP_PATH=/mcp
 export GB_MCP_BEARER_TOKEN='replace-me'
-# Optional until a public hostname exists; see Cloudflare section.
-# export GB_MCP_PUBLIC_URL=https://gb.example.com
+# Optional. Leave unset to derive the origin from the request Host header.
+# export GB_MCP_PUBLIC_URL=https://gb-mcp-server.com
 python server.py --http
 ```
 
@@ -135,7 +131,8 @@ The process binds `0.0.0.0:8080` by default and serves MCP at `/mcp`.
 unset, absolute links and `/.well-known/oauth-protected-resource` derive the
 origin from the request `Host` header (`X-Forwarded-Proto` if present), then
 fall back to `http://127.0.0.1:8080`. Restarting with a new
-`GB_MCP_PUBLIC_URL` is enough when the tunnel hostname changes.
+`GB_MCP_PUBLIC_URL` is enough when the tunnel hostname changes. No hostname
+is hard-coded in source.
 
 SSE responses use `Content-Type: text/event-stream` and are not buffered by
 this process. Cloudflare Tunnel buffers ordinary HTTP; it streams SSE. **Quick
@@ -159,8 +156,8 @@ is `${GB_MCP_PUBLIC_URL}/mcp` when `GB_MCP_PUBLIC_URL` is set.
 
 ### Client config (Claude / Cursor / inspector)
 
-Point the client at **`${GB_MCP_PUBLIC_URL}/mcp`** and send the bearer header.
-Do not put the token in a tool argument.
+Point the client at **`https://gb-mcp-server.com/mcp`** and send the bearer
+header. Do not put the token in a tool argument.
 
 **Claude Desktop / Claude Code** (`claude_desktop_config.json` or `.mcp.json`):
 
@@ -169,7 +166,7 @@ Do not put the token in a tool argument.
   "mcpServers": {
     "gb-mcp-server": {
       "type": "http",
-      "url": "${GB_MCP_PUBLIC_URL}/mcp",
+      "url": "https://gb-mcp-server.com/mcp",
       "headers": {
         "Authorization": "Bearer ${GB_MCP_BEARER_TOKEN}"
       }
@@ -184,7 +181,7 @@ Do not put the token in a tool argument.
 {
   "mcpServers": {
     "gb-mcp-server": {
-      "url": "${GB_MCP_PUBLIC_URL}/mcp",
+      "url": "https://gb-mcp-server.com/mcp",
       "headers": {
         "Authorization": "Bearer ${GB_MCP_BEARER_TOKEN}"
       }
@@ -194,7 +191,7 @@ Do not put the token in a tool argument.
 ```
 
 **MCP Inspector**: transport **Streamable HTTP**, URL
-`${GB_MCP_PUBLIC_URL}/mcp`, custom header `Authorization` =
+`https://gb-mcp-server.com/mcp`, custom header `Authorization` =
 `Bearer ${GB_MCP_BEARER_TOKEN}`. Inspector is a browser; set
 `GB_MCP_CORS_ORIGINS` (below) to its origin, often `http://localhost:6274`.
 
@@ -213,21 +210,23 @@ reflects an arbitrary `Origin` with credentials. Allowed request headers
 include `Authorization`, `Content-Type`, `Accept`, `mcp-session-id`, and
 `mcp-protocol-version`.
 
-## Public URL via Cloudflare Tunnel
+## Cloudflare Tunnel
 
-The repo cannot log into Cloudflare or create a domain. Finish these steps in
-the dashboard after copying `.env.example` to `.env`.
+The repo cannot log into Cloudflare or create a domain. No hostname is
+hard-coded in source. Finish these steps in the dashboard after copying
+`.env.example` to `.env`.
 
 1. Domain already on Cloudflare (you must have this; the repo cannot create it).
 2. Zero Trust → Networks → Tunnels → Create a **named** tunnel → copy the
    token into `TUNNEL_TOKEN`.
-3. Public hostname route: `TUNNEL_HOSTNAME` → `http://gb-mcp-server:8080`
-   (compose) or `http://localhost:8080` (host-run). Ingress scaffolding is
-   `cloudflared/config.example.yml` (replace `${TUNNEL_HOSTNAME}`; do not
-   commit the copied file).
-4. Set `GB_MCP_PUBLIC_URL=https://<that hostname>` and restart MCP.
-5. Point the LLM client at `https://<hostname>/mcp` with the bearer token
-   (JSON above).
+3. Public hostname route: `TUNNEL_HOSTNAME=gb-mcp-server.com` →
+   `http://gb-mcp-server:8080` (compose) or `http://localhost:8080` (host-run).
+   Ingress scaffolding is `cloudflared/config.example.yml` (replace
+   `${TUNNEL_HOSTNAME}`; do not commit the copied file).
+4. Optionally set `GB_MCP_PUBLIC_URL=https://gb-mcp-server.com` and restart MCP
+   (leave empty to derive the origin from `Host`).
+5. Point the LLM client at `https://gb-mcp-server.com/mcp` with the bearer
+   token (JSON above).
 6. Do not use `cloudflared tunnel --url` quick tunnels for MCP streaming.
 
 ```bash
@@ -235,10 +234,6 @@ cp .env.example .env
 touch user_subdirectories.sqlite3
 docker compose --profile tunnel up --build
 ```
-
-`gb-mcp-server` listens on the compose network (`expose: "8080"`). The host
-firewall does not need 8080 open. Uncomment `ports` in `compose.yaml` only to
-debug against `http://127.0.0.1:8080/mcp`.
 
 ## Environment
 

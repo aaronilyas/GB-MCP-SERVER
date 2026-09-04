@@ -1,4 +1,5 @@
-# Runtime deps for the gb-pyboy-instance image (headless PyBoy).
+# Runtime pins for the gb-pyboy-instance image (Dockerfile.instance).
+# Host/dev installs use requirements.txt, which includes this file.
 numpy==2.5.2
 opencv-python==5.0.0.93
 pillow==11.3.0

@@ -32,6 +32,12 @@ def _ensure_image() -> None:
     )
     if probe.returncode == 0:
         return
+    dockerfile = config.ROOT / "Dockerfile"
+    if not dockerfile.is_file():
+        raise RuntimeError(
+            f"Docker image {config.DOCKER_IMAGE} is not present. "
+            "Build it with compose or `docker build -t gb-rom-validator:latest .`"
+        )
     build = subprocess.run(
         ["docker", "build", "-t", config.DOCKER_IMAGE, str(config.ROOT)],
         capture_output=True,

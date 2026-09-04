@@ -1,5 +1,6 @@
 # One headless PyBoy per ROM subdirectory (`gb-play-<32hex>`).
 # Started by the MCP process via the Docker daemon. --network=none; no docker.sock.
+# Runtime pins: requirements-instance.txt (not requirements.txt).
 FROM python:3.12-bookworm
 
 RUN apt-get update \

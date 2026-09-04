@@ -97,6 +97,26 @@ def test_ensure_image_builds_when_missing(monkeypatch: pytest.MonkeyPatch) -> No
     assert any(cmd[:2] == ["docker", "build"] for cmd in calls)
 
 
+def test_ensure_image_requires_prebuilt_without_dockerfile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from gb_mcp import config
+
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return CompletedProcess(args=cmd, returncode=1, stdout="", stderr="")
+        raise AssertionError(cmd)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="not present"):
+        docker._ensure_image()
+    assert not any(cmd[:2] == ["docker", "build"] for cmd in calls)
+
+
 def test_play_create_args_lock_down_instance(roms_dir, monkeypatch: pytest.MonkeyPatch) -> None:
     from gb_mcp import config
     from gb_mcp.emulator.instance import play_create_args
@@ -169,6 +189,28 @@ def test_ensure_instance_image_builds_dockerfile_instance(
     assert config.INSTANCE_IMAGE in build
     assert "-f" in build
     assert any(str(arg).endswith("Dockerfile.instance") for arg in build)
+
+
+def test_ensure_instance_image_requires_prebuilt_without_dockerfile(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from gb_mcp import config
+    from gb_mcp.emulator import instance as play
+    from gb_mcp.isolation import docker as isolation
+
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    calls: list[list[str]] = []
+
+    def fake_run_docker(args, *, input_bytes=None, timeout=60):
+        calls.append(args)
+        if args[:2] == ["image", "inspect"]:
+            return CompletedProcess(args=args, returncode=1, stdout=b"", stderr=b"")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(isolation, "_run_docker", fake_run_docker)
+    with pytest.raises(RuntimeError, match="not present"):
+        play._ensure_instance_image()
+    assert not any(args[:2] == ["build", "-t"] for args in calls)
 
 
 def test_play_rpc_errors_are_clean(monkeypatch: pytest.MonkeyPatch) -> None:

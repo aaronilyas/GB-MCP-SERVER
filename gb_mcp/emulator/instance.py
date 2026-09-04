@@ -21,9 +21,15 @@ from gb_mcp import config
 from gb_mcp.emulator.backend import (
     InstanceDeadError,
     InstanceHandle,
+    _dead_message,
     play_container_name,
 )
-from gb_mcp.emulator.loop import INPUT_COMMAND_TIMEOUT_SECONDS, _state_path_for_rom
+from gb_mcp.emulator.loop import (
+    INPUT_COMMAND_TIMEOUT_SECONDS,
+    _state_path_for_rom,
+    overlay_status,
+    shape_status,
+)
 from gb_mcp.isolation import docker as isolation
 
 
@@ -256,6 +262,12 @@ def _ensure_instance_image() -> None:
     if probe.returncode == 0:
         return
     dockerfile = config.ROOT / "Dockerfile.instance"
+    if not dockerfile.is_file():
+        raise RuntimeError(
+            f"Play instance image {config.INSTANCE_IMAGE} is not present. "
+            "Build it with compose or "
+            "`docker build -t gb-pyboy-instance:latest -f Dockerfile.instance .`"
+        )
     build = isolation._run_docker(
         [
             "build",
@@ -371,47 +383,27 @@ def _host_status(
     running: bool,
     close_reason: str | None = None,
 ) -> dict[str, Any]:
+    state = _state_path_for_rom(handle.rom_path)
+    saved = False
     try:
-        rom_path = str(handle.rom_path.relative_to(config.ROOT))
-    except ValueError:
-        rom_path = str(handle.rom_path)
-    payload: dict[str, Any] = {
-        "email": handle.email,
-        "subdirectory": handle.subdirectory,
-        "rom": handle.rom_path.name,
-        "rom_path": rom_path,
-        "running": running,
-        "saved": _state_path_for_rom(handle.rom_path).is_file()
-        and _state_path_for_rom(handle.rom_path).stat().st_size > 0,
-    }
-    if close_reason:
-        payload["close_reason"] = close_reason
-    return payload
+        saved = state.is_file() and state.stat().st_size > 0
+    except OSError:
+        saved = False
+    return shape_status(
+        email=handle.email,
+        subdirectory=handle.subdirectory,
+        rom_path=handle.rom_path,
+        running=running,
+        saved=saved,
+        close_reason=close_reason,
+    )
 
 
 def _overlay_host_status(handle: InstanceHandle, remote: dict[str, Any]) -> dict[str, Any]:
-    payload = _host_status(handle, running=bool(remote.get("running", True)))
-    for key in (
-        "restored_state",
-        "restore_error",
-        "idle_timeout_seconds",
-        "seconds_until_idle_close",
-        "cartridge_title",
-        "saved",
-        "close_reason",
-    ):
-        if key in remote:
-            payload[key] = remote[key]
-    return payload
-
-
-def _dead_message(reason: str | None) -> str:
-    if reason == "idle_timeout":
-        return (
-            "PyBoy session closed after idle timeout; call load_subdirectory_rom "
-            "to start it again"
-        )
-    return "Play instance is no longer running"
+    return overlay_status(
+        _host_status(handle, running=bool(remote.get("running", True))),
+        remote,
+    )
 
 
 # Imported by tests that assert bind-mount construction.

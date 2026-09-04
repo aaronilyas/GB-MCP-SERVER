@@ -28,6 +28,15 @@ INPUT_COMMAND_TIMEOUT_SECONDS = (
     MAX_INPUT_STEPS * (MAX_HOLD_FRAMES + 1)
 ) / 60.0 + 30.0
 PyBoyFactory = Callable[[Path], Any]
+REMOTE_STATUS_KEYS = (
+    "restored_state",
+    "restore_error",
+    "idle_timeout_seconds",
+    "seconds_until_idle_close",
+    "cartridge_title",
+    "saved",
+    "close_reason",
+)
 
 
 def _state_path_for_rom(rom_path: Path) -> Path:
@@ -48,6 +57,43 @@ def _png_from_screen(pyboy: Any) -> bytes:
     if not data:
         raise RuntimeError("failed to encode PyBoy screenshot")
     return data
+
+
+def shape_status(
+    *,
+    email: str,
+    subdirectory: str,
+    rom_path: Path,
+    running: bool,
+    saved: bool = False,
+    close_reason: str | None = None,
+    **fields: Any,
+) -> dict[str, Any]:
+    """Common play-status dict used by in-process and Docker backends."""
+    try:
+        display = str(rom_path.relative_to(config.ROOT))
+    except ValueError:
+        display = str(rom_path)
+    payload: dict[str, Any] = {
+        "email": email,
+        "subdirectory": subdirectory,
+        "rom": rom_path.name,
+        "rom_path": display,
+        "running": running,
+        "saved": saved,
+    }
+    if close_reason:
+        payload["close_reason"] = close_reason
+    payload.update(fields)
+    return payload
+
+
+def overlay_status(base: dict[str, Any], remote: dict[str, Any]) -> dict[str, Any]:
+    """Copy selected fields from a remote instance status onto a host payload."""
+    for key in REMOTE_STATUS_KEYS:
+        if key in remote:
+            base[key] = remote[key]
+    return base
 
 
 def _default_pyboy_factory(rom_path: Path) -> Any:
@@ -178,26 +224,20 @@ class EmulatorSession:
         return max(0.0, remaining)
 
     def status(self, **extra: Any) -> dict[str, Any]:
-        try:
-            rom_path = str(self.rom_path.relative_to(config.ROOT))
-        except ValueError:
-            rom_path = str(self.rom_path)
-        payload: dict[str, Any] = {
-            "email": self.email,
-            "subdirectory": self.subdirectory,
-            "rom": self.rom_path.name,
-            "rom_path": rom_path,
-            "running": self.is_running,
-            "restored_state": self.restored_state,
-            "idle_timeout_seconds": self._idle_timeout,
-            "seconds_until_idle_close": round(self.seconds_until_idle_close(), 3),
-            "cartridge_title": self.cartridge_title,
-            "saved": self.saved,
-        }
+        payload = shape_status(
+            email=self.email,
+            subdirectory=self.subdirectory,
+            rom_path=self.rom_path,
+            running=self.is_running,
+            saved=self.saved,
+            close_reason=self.close_reason,
+            restored_state=self.restored_state,
+            idle_timeout_seconds=self._idle_timeout,
+            seconds_until_idle_close=round(self.seconds_until_idle_close(), 3),
+            cartridge_title=self.cartridge_title,
+        )
         if self.restore_error:
             payload["restore_error"] = self.restore_error
-        if self.close_reason:
-            payload["close_reason"] = self.close_reason
         payload.update(extra)
         return payload
 

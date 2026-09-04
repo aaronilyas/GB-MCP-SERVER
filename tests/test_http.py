@@ -186,7 +186,7 @@ def test_public_url_unset_does_not_crash(http_env, monkeypatch: pytest.MonkeyPat
 
 
 def test_well_known_uses_public_url_when_set(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GB_MCP_PUBLIC_URL", "https://gb.example.com")
+    monkeypatch.setenv("GB_MCP_PUBLIC_URL", "https://gb-mcp-server.com")
     app = create_http_app(server.mcp)
     with TestClient(app) as client:
         response = client.get(
@@ -199,8 +199,8 @@ def test_well_known_uses_public_url_when_set(http_env, monkeypatch: pytest.Monke
             json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
         )
     assert response.status_code == 200
-    assert response.json()["resource"] == "https://gb.example.com/mcp"
-    assert "https://gb.example.com/.well-known/oauth-protected-resource" in mcp_denied.headers[
+    assert response.json()["resource"] == "https://gb-mcp-server.com/mcp"
+    assert "https://gb-mcp-server.com/.well-known/oauth-protected-resource" in mcp_denied.headers[
         "www-authenticate"
     ]
 
@@ -277,7 +277,7 @@ def test_http_mode_requires_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_public_base_url_prefers_env_over_host(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GB_MCP_PUBLIC_URL", "https://gb.example.com/")
+    monkeypatch.setenv("GB_MCP_PUBLIC_URL", "https://gb-mcp-server.com/")
     request = Request(
         {
             "type": "http",
@@ -288,5 +288,5 @@ def test_public_base_url_prefers_env_over_host(http_env, monkeypatch: pytest.Mon
             "server": ("127.0.0.1", 8080),
         }
     )
-    assert public_base_url(request) == "https://gb.example.com"
-    assert mcp_resource_url(request) == "https://gb.example.com/mcp"
+    assert public_base_url(request) == "https://gb-mcp-server.com"
+    assert mcp_resource_url(request) == "https://gb-mcp-server.com/mcp"

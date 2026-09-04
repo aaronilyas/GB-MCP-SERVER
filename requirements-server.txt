@@ -1,4 +1,6 @@
-# Runtime deps for the gb-mcp-server image (no PyBoy — play is in gb-pyboy-instance).
+# Runtime pins for the gb-mcp-server image (Dockerfile.server).
+# Host/dev installs use requirements.txt, which includes this file.
+# Play (PyBoy) is in requirements-instance.txt / the gb-pyboy-instance image.
 annotated-types==0.8.0
 anyio==4.15.0
 attrs==26.1.0
