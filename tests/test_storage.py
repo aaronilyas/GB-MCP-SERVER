@@ -12,7 +12,9 @@ from gb_mcp.storage.roms import (
     _isoformat,
     _iter_subdirectory_files,
     _persist_validated_rom,
+    _rom_in_subdirectory,
     _sanitize_filename,
+    _state_path_for_rom,
 )
 
 from rom_builder import make_rom
@@ -136,3 +138,29 @@ def test_describe_rom_and_other_files(roms_dir: Path) -> None:
     assert kinds["notes.txt"] == "other"
     truncated = next(e for e in info["files"] if e["filename"] == "truncated.gb")
     assert "error" in truncated
+
+
+def test_state_path_for_rom(tmp_path: Path) -> None:
+    rom = tmp_path / "tetris.gb"
+    assert _state_path_for_rom(rom) == tmp_path / "tetris.gb.state"
+
+
+def test_rom_in_subdirectory_missing(roms_dir: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        _rom_in_subdirectory("missing")
+
+
+def test_rom_in_subdirectory_empty(roms_dir: Path) -> None:
+    (roms_dir / "empty").mkdir()
+    with pytest.raises(FileNotFoundError, match="no Game Boy ROM"):
+        _rom_in_subdirectory("empty")
+
+
+def test_rom_in_subdirectory_skips_invalid_and_picks_first_valid(roms_dir: Path) -> None:
+    dest = roms_dir / "games"
+    dest.mkdir()
+    (dest / "notes.txt").write_text("hi")
+    (dest / "truncated.gb").write_bytes(b"nope")
+    (dest / "alpha.gb").write_bytes(make_rom(title=b"ALPHA"))
+    (dest / "zeta.gb").write_bytes(make_rom(title=b"ZETA"))
+    assert _rom_in_subdirectory("games").name == "alpha.gb"

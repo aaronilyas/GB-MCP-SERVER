@@ -6,7 +6,9 @@ isolated Docker container (no network, dropped capabilities), and only persist
 the file under ./roms/<32-char>/ when validation succeeds. After a ROM is
 accepted the server returns that subdirectory name and requests the LLM user's
 email so the two can be mapped in a local SQLite database. A listing tool
-returns that user's mapped subdirectories and ROM header metadata.
+returns that user's mapped subdirectories and ROM header metadata. Mapped
+subdirectories can be loaded into a persistent PyBoy session (idle auto-save
+and close after 5 minutes without input).
 """
 
 from __future__ import annotations
@@ -21,6 +23,8 @@ from pydantic import Field
 import db
 from gb_mcp import config
 from gb_mcp.config import MAX_ROM_B64_CHARS, MAX_ROM_BYTES
+from gb_mcp.emulator import session as pyboy_sessions
+from gb_mcp.emulator.session import BUTTONS, MAX_HOLD_FRAMES
 from gb_mcp.isolation.docker import (
     _create_isolated_container,
     _destroy_container,
@@ -32,6 +36,7 @@ from gb_mcp.storage.roms import (
     _allocate_subdirectory_name,
     _describe_subdirectory,
     _persist_validated_rom,
+    _rom_in_subdirectory,
     _sanitize_filename,
 )
 
@@ -44,7 +49,11 @@ mcp = MCPServer(
         "roms/. After a ROM passes validation the server returns that "
         "subdirectory name and requests the email address of the user of the "
         "LLM. Map the two with map_subdirectory_to_email. List a user's mapped "
-        "ROM subdirectories and game metadata with list_subdirectories_for_email."
+        "ROM subdirectories and game metadata with list_subdirectories_for_email. "
+        "Load a mapped subdirectory's ROM into PyBoy with load_subdirectory_rom "
+        "(email and subdirectory name are both required). Keep the session alive "
+        "by sending buttons with send_pyboy_input; stop it with stop_pyboy. "
+        "Five minutes without button input auto-saves the game and closes PyBoy."
     ),
 )
 
@@ -65,6 +74,56 @@ def _email_model_request(subdirectory: str) -> dict[str, str]:
             "map_subdirectory_to_email with the subdirectory name and email."
         ),
     }
+
+
+def _subdirectory_name(subdirectory: str) -> str:
+    name = subdirectory.strip().lower()
+    if len(name) != db.SUBDIRECTORY_NAME_LENGTH or not re.fullmatch(r"[0-9a-f]+", name):
+        raise ValueError(
+            f"subdirectory must be a {db.SUBDIRECTORY_NAME_LENGTH}-character "
+            "hexadecimal name returned by submit_gb_rom"
+        )
+    return name
+
+
+def _owned_subdirectory(email: str, subdirectory: str) -> tuple[str, str] | dict[str, Any]:
+    """Validate email + subdirectory and confirm the mapping exists.
+
+    Returns (normalized_email, name) on success, or an error dict.
+    """
+    try:
+        normalized_email = db.normalize_email(email)
+        name = _subdirectory_name(subdirectory)
+    except ValueError as exc:
+        return {
+            "email": email,
+            "subdirectory": subdirectory,
+            "error": str(exc),
+        }
+
+    try:
+        with db.session_scope() as session:
+            row = db.get_subdirectory_for_email(session, name, normalized_email)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": str(exc),
+        }
+
+    if row is None:
+        return {
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": f"subdirectory {name!r} is not mapped to {normalized_email}",
+        }
+    if not (config.ROMS_DIR / name).is_dir():
+        return {
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": f"subdirectory {name!r} does not exist under roms/",
+        }
+    return normalized_email, name
 
 
 @mcp.tool(
@@ -246,15 +305,13 @@ def map_subdirectory_to_email(
     ],
 ) -> dict[str, Any]:
     """Persist the mapping between a ROM subdirectory and the user's email."""
-    name = subdirectory.strip().lower()
-    if len(name) != db.SUBDIRECTORY_NAME_LENGTH or not re.fullmatch(r"[0-9a-f]+", name):
+    try:
+        name = _subdirectory_name(subdirectory)
+    except ValueError as exc:
         return {
             "mapped": False,
             "subdirectory": subdirectory,
-            "error": (
-                f"subdirectory must be a {db.SUBDIRECTORY_NAME_LENGTH}-character "
-                "hexadecimal name returned by submit_gb_rom"
-            ),
+            "error": str(exc),
         }
     if not (config.ROMS_DIR / name).is_dir():
         return {
@@ -325,6 +382,217 @@ def list_subdirectories_for_email(
             "email": email,
             "count": 0,
             "subdirectories": [],
+            "error": str(exc),
+        }
+
+
+@mcp.tool(
+    name="load_subdirectory_rom",
+    description=(
+        "Load a mapped ROM subdirectory and start a persistent PyBoy session "
+        "for that game. Both the LLM user's email and the 32-character "
+        "subdirectory name are required. The session keeps running until "
+        "stop_pyboy is called, or until about 5 minutes pass with no button "
+        "input from send_pyboy_input; idle timeout auto-saves then closes "
+        "PyBoy. A later load of the same subdirectory restores that save."
+    ),
+)
+def load_subdirectory_rom(
+    email: Annotated[
+        str,
+        Field(
+            description=(
+                "Email address of the user of the LLM who owns the ROM "
+                "subdirectory. Ask the user for this if you do not already "
+                "have it."
+            )
+        ),
+    ],
+    subdirectory: Annotated[
+        str,
+        Field(
+            description=(
+                "The 32-character subdirectory name returned by submit_gb_rom "
+                "and mapped with map_subdirectory_to_email."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Start (or resume) a PyBoy session for an owned ROM subdirectory."""
+    resolved = _owned_subdirectory(email, subdirectory)
+    if isinstance(resolved, dict):
+        resolved["started"] = False
+        resolved["running"] = False
+        return resolved
+
+    normalized_email, name = resolved
+    try:
+        rom_path = _rom_in_subdirectory(name)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": str(exc),
+        }
+
+    try:
+        result = pyboy_sessions.manager.load(normalized_email, name, rom_path)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": f"failed to start PyBoy: {exc}",
+        }
+    return result
+
+
+@mcp.tool(
+    name="send_pyboy_input",
+    description=(
+        "Send Game Boy button input to a running PyBoy session. Both the LLM "
+        "user's email and the 32-character subdirectory name are required. "
+        "Valid buttons: a, b, start, select, up, down, left, right. Any "
+        "successful call resets the 5-minute idle timer. After 5 minutes "
+        "with no input the session auto-saves and PyBoy closes."
+    ),
+)
+def send_pyboy_input(
+    email: Annotated[
+        str,
+        Field(
+            description=(
+                "Email address of the user of the LLM who owns the running "
+                "PyBoy session. Ask the user for this if you do not already "
+                "have it."
+            )
+        ),
+    ],
+    subdirectory: Annotated[
+        str,
+        Field(
+            description=(
+                "The 32-character subdirectory name of the running PyBoy session."
+            )
+        ),
+    ],
+    buttons: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Game Boy buttons to press together this step. Each value must "
+                "be one of: a, b, start, select, up, down, left, right."
+            )
+        ),
+    ],
+    hold_frames: Annotated[
+        int,
+        Field(
+            default=1,
+            description=(
+                "How many emulator frames to hold the buttons before release. "
+                f"Must be between 1 and {MAX_HOLD_FRAMES}."
+            ),
+        ),
+    ] = 1,
+) -> dict[str, Any]:
+    """Press buttons on a running PyBoy session and reset the idle timer."""
+    resolved = _owned_subdirectory(email, subdirectory)
+    if isinstance(resolved, dict):
+        resolved["sent"] = False
+        return resolved
+
+    normalized_email, name = resolved
+    if not buttons:
+        return {
+            "sent": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": "at least one button is required",
+        }
+
+    normalized_buttons: list[str] = []
+    for button in buttons:
+        value = button.strip().lower()
+        if value not in BUTTONS:
+            return {
+                "sent": False,
+                "email": normalized_email,
+                "subdirectory": name,
+                "error": (
+                    f"invalid button {button!r}; expected one of "
+                    f"{', '.join(sorted(BUTTONS))}"
+                ),
+            }
+        normalized_buttons.append(value)
+
+    if not isinstance(hold_frames, int) or hold_frames < 1 or hold_frames > MAX_HOLD_FRAMES:
+        return {
+            "sent": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": f"hold_frames must be an integer from 1 to {MAX_HOLD_FRAMES}",
+        }
+
+    try:
+        return pyboy_sessions.manager.send_input(
+            normalized_email, name, normalized_buttons, hold_frames
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "sent": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": str(exc),
+        }
+
+
+@mcp.tool(
+    name="stop_pyboy",
+    description=(
+        "Stop a running PyBoy session. Both the LLM user's email and the "
+        "32-character subdirectory name are required. The game is saved "
+        "before PyBoy closes. Use this instead of waiting for the 5-minute "
+        "idle auto-save."
+    ),
+)
+def stop_pyboy(
+    email: Annotated[
+        str,
+        Field(
+            description=(
+                "Email address of the user of the LLM who owns the running "
+                "PyBoy session. Ask the user for this if you do not already "
+                "have it."
+            )
+        ),
+    ],
+    subdirectory: Annotated[
+        str,
+        Field(
+            description=(
+                "The 32-character subdirectory name of the PyBoy session to stop."
+            )
+        ),
+    ],
+) -> dict[str, Any]:
+    """Save and close a running PyBoy session."""
+    resolved = _owned_subdirectory(email, subdirectory)
+    if isinstance(resolved, dict):
+        resolved["stopped"] = False
+        return resolved
+
+    normalized_email, name = resolved
+    try:
+        return pyboy_sessions.manager.stop(normalized_email, name)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "stopped": False,
+            "email": normalized_email,
+            "subdirectory": name,
             "error": str(exc),
         }
 

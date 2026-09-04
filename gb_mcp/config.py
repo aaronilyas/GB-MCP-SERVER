@@ -12,3 +12,6 @@ ROMS_DIR = ROOT / "roms"
 DOCKER_IMAGE = os.environ.get("GB_ROM_VALIDATOR_IMAGE", "gb-rom-validator:latest")
 # Base64 expands 3 bytes -> 4 chars; reject before decode to bound host memory.
 MAX_ROM_B64_CHARS = (MAX_ROM_BYTES + 2) // 3 * 4
+# Close a PyBoy session after this many seconds with no model button input.
+IDLE_TIMEOUT_SECONDS = int(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "300"))
+PYBOY_WINDOW = os.environ.get("GB_PYBOY_WINDOW", "null")

@@ -86,3 +86,15 @@ def test_new_subdirectory_name_is_32_hex() -> None:
     name = db.new_subdirectory_name()
     assert len(name) == db.SUBDIRECTORY_NAME_LENGTH
     assert all(c in "0123456789abcdef" for c in name)
+
+
+def test_get_subdirectory_for_email_requires_mapping(isolated_db) -> None:
+    name = "g" * db.SUBDIRECTORY_NAME_LENGTH
+    with db.session_scope() as session:
+        assert db.get_subdirectory_for_email(session, name, "owner@example.com") is None
+        db.map_subdirectory_to_email(session, name, "owner@example.com")
+    with db.session_scope() as session:
+        row = db.get_subdirectory_for_email(session, name, "Owner@Example.com")
+        assert row is not None
+        assert row.name == name
+        assert db.get_subdirectory_for_email(session, name, "other@example.com") is None

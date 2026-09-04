@@ -71,6 +71,32 @@ def _isoformat(value: datetime | None) -> str | None:
     return value.isoformat()
 
 
+def _state_path_for_rom(rom_path: Path) -> Path:
+    """Return the PyBoy save-state path stored next to the ROM (`rom.gb.state`)."""
+    return Path(str(rom_path) + ".state")
+
+
+def _rom_in_subdirectory(name: str) -> Path:
+    """Return the first valid Game Boy ROM in `roms/<name>/`.
+
+    Raises:
+        FileNotFoundError: If the subdirectory is missing or has no usable ROM.
+    """
+    dest = config.ROMS_DIR / name
+    if not dest.is_dir():
+        raise FileNotFoundError(f"subdirectory {name!r} does not exist under roms/")
+
+    roms = [path for path in _iter_subdirectory_files(dest) if path.suffix.lower() in ROM_SUFFIXES]
+    if not roms:
+        raise FileNotFoundError(f"no Game Boy ROM found in subdirectory {name!r}")
+
+    for path in roms:
+        identity = _read_rom_identity(path)
+        if "error" not in identity:
+            return path
+    raise FileNotFoundError(f"no valid Game Boy ROM found in subdirectory {name!r}")
+
+
 def _iter_subdirectory_files(dest: Path) -> list[Path]:
     dest_resolved = dest.resolve()
     files: list[Path] = []

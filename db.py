@@ -191,3 +191,18 @@ def list_subdirectories_for_email(session: Session, email: str) -> list[Subdirec
         .order_by(Subdirectory.created_at.asc(), Subdirectory.id.asc())
     )
     return list(session.scalars(stmt).all())
+
+
+def get_subdirectory_for_email(session: Session, name: str, email: str) -> Subdirectory | None:
+    """Return the subdirectory if it is mapped to `email`, else None.
+
+    Does not create a user or mapping. Unknown emails and names yield None.
+    """
+    name = name.strip().lower()
+    email = normalize_email(email)
+    stmt = (
+        select(Subdirectory)
+        .join(User)
+        .where(Subdirectory.name == name, User.email == email)
+    )
+    return session.scalar(stmt)

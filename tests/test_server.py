@@ -146,3 +146,90 @@ def test_list_invalid_email() -> None:
     assert result["count"] == 0
     assert result["subdirectories"] == []
     assert "error" in result
+
+
+def _mapped_rom(roms_dir: Path, *, email: str = "owner@example.com", name: str | None = None) -> str:
+    name = name or ("e" * db.SUBDIRECTORY_NAME_LENGTH)
+    dest = roms_dir / name
+    dest.mkdir()
+    (dest / "tetris.gb").write_bytes(make_rom(title=b"TETRIS"))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, email)
+    return name
+
+
+def test_load_subdirectory_rom_requires_email_and_mapping(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir)
+    missing = server.load_subdirectory_rom("other@example.com", name)
+    assert missing["started"] is False
+    assert "not mapped" in missing["error"]
+
+    invalid = server.load_subdirectory_rom("not-an-email", name)
+    assert invalid["started"] is False
+    assert "invalid email" in invalid["error"]
+
+    bad_name = server.load_subdirectory_rom("owner@example.com", "nope")
+    assert bad_name["started"] is False
+    assert "hexadecimal" in bad_name["error"]
+
+
+def test_load_subdirectory_rom_starts_pyboy(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir)
+    result = server.load_subdirectory_rom("Owner@Example.com", name)
+    assert result["started"] is True
+    assert result["running"] is True
+    assert result["email"] == "owner@example.com"
+    assert result["subdirectory"] == name
+    assert result["rom"] == "tetris.gb"
+    assert result["idle_timeout_seconds"] == 30
+
+    again = server.load_subdirectory_rom("owner@example.com", name)
+    assert again["already_running"] is True
+
+    sent = server.send_pyboy_input("owner@example.com", name, ["A", "Up"], hold_frames=3)
+    assert sent["sent"] is True
+    assert sent["buttons"] == ["a", "up"]
+
+    stopped = server.stop_pyboy("owner@example.com", name)
+    assert stopped["stopped"] is True
+    assert stopped["saved"] is True
+
+
+def test_load_subdirectory_rom_requires_rom_file(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = "f" * db.SUBDIRECTORY_NAME_LENGTH
+    (roms_dir / name).mkdir()
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "owner@example.com")
+    result = server.load_subdirectory_rom("owner@example.com", name)
+    assert result["started"] is False
+    assert "no Game Boy ROM" in result["error"]
+
+
+def test_send_pyboy_input_validates_buttons(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name)
+    empty = server.send_pyboy_input("owner@example.com", name, [])
+    assert empty["sent"] is False
+    assert "at least one button" in empty["error"]
+
+    bad = server.send_pyboy_input("owner@example.com", name, ["turbo"])
+    assert bad["sent"] is False
+    assert "invalid button" in bad["error"]
+
+    hold = server.send_pyboy_input("owner@example.com", name, ["a"], hold_frames=0)
+    assert hold["sent"] is False
+    assert "hold_frames" in hold["error"]
+
+
+def test_send_pyboy_input_without_session(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir)
+    result = server.send_pyboy_input("owner@example.com", name, ["a"])
+    assert result["sent"] is False
+    assert "no PyBoy session" in result["error"]
+
+
+def test_stop_pyboy_without_session(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir)
+    result = server.stop_pyboy("owner@example.com", name)
+    assert result["stopped"] is False
+    assert "no PyBoy session" in result["error"]

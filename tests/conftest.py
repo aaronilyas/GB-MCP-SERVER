@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from sqlalchemy.orm import sessionmaker
 
 import db
 from gb_mcp import config
+from gb_mcp.emulator.session import SessionManager
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 VALIDATOR_PATH = REPO_ROOT / "docker" / "validate_gb_rom.py"
@@ -51,6 +53,56 @@ def roms_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(config, "ROOT", root)
     monkeypatch.setattr(config, "ROMS_DIR", roms)
     return roms
+
+
+class FakePyBoy:
+    """Stand-in for PyBoy so session tests do not start a real emulator."""
+
+    def __init__(self, rom_path: Path) -> None:
+        self.gamerom = str(rom_path)
+        self.cartridge_title = "TESTGAME"
+        self.buttons: list[tuple[str, int]] = []
+        self.ticks = 0
+        self.stopped = False
+        self.saved_ram = False
+        self.speed: int | None = None
+        self.loaded_state: bytes | None = None
+        self._dead = threading.Event()
+
+    def set_emulation_speed(self, speed: int) -> None:
+        self.speed = speed
+
+    def button(self, name: str, delay: int = 1) -> None:
+        self.buttons.append((name, delay))
+
+    def save_state(self, fh) -> None:
+        fh.write(b"FAKESTATE")
+
+    def load_state(self, fh) -> None:
+        self.loaded_state = fh.read()
+
+    def tick(self, count: int = 1, render: bool = True) -> bool:
+        if self._dead.is_set():
+            return False
+        self._dead.wait(0.01)
+        self.ticks += 1
+        return not self._dead.is_set()
+
+    def stop(self, save: bool = True, ram_file=None, rtc_file=None) -> None:
+        self.saved_ram = bool(save)
+        self.stopped = True
+        self._dead.set()
+
+
+@pytest.fixture
+def pyboy_manager(monkeypatch: pytest.MonkeyPatch) -> Iterator[SessionManager]:
+    """Install a FakePyBoy session manager for the duration of a test."""
+    from gb_mcp.emulator import session as pyboy_sessions
+
+    manager = SessionManager(pyboy_factory=FakePyBoy, idle_timeout_seconds=30)
+    monkeypatch.setattr(pyboy_sessions, "manager", manager)
+    yield manager
+    manager.shutdown()
 
 
 @pytest.fixture(scope="session")
