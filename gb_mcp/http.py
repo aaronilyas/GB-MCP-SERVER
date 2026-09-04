@@ -1,8 +1,9 @@
-"""Streamable HTTP front-end: bearer auth, CORS, and public-resource metadata.
+"""Streamable HTTP front-end: dual auth, CORS, OAuth, and public metadata.
 
 Stdio remains the default transport. This module is imported by `server.py` so
 HTTP mode can wrap the same MCP tools and resources without baking a hostname
-into the process.
+into the process. `/mcp` accepts a static bearer / operator JWT or an access
+token from the in-process OAuth authorization server.
 """
 
 from __future__ import annotations
@@ -24,8 +25,21 @@ from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
 from gb_mcp import config
+from gb_mcp.oauth import (
+    MCP_SCOPE,
+    authorization_server_payload,
+    decode_access_token_claims,
+    handle_authorize,
+    handle_register,
+    handle_token,
+    oauth_claims_match_request,
+    protected_resource_fields,
+    reset_oauth_state,
+)
 
-_WELL_KNOWN_PATH = "/.well-known/oauth-protected-resource"
+_WELL_KNOWN_PRM = "/.well-known/oauth-protected-resource"
+_WELL_KNOWN_AS = "/.well-known/oauth-authorization-server"
+_WELL_KNOWN_OIDC = "/.well-known/openid-configuration"
 _JWT_ALGORITHMS = ["HS256"]
 _attached_servers: set[int] = set()
 
@@ -59,16 +73,17 @@ def mcp_resource_url(request: Request | None = None) -> str:
 
 
 def resource_metadata_url(request: Request | None = None) -> str:
-    return f"{public_base_url(request)}{_WELL_KNOWN_PATH}"
+    return f"{public_base_url(request)}{_WELL_KNOWN_PRM}"
+
+
+def path_aware_well_known(kind: str) -> str:
+    """RFC 9728 / RFC 8414 path insertion: `/.well-known/{kind}{mcp_path}`."""
+    return f"/.well-known/{kind}{config.http_path()}"
 
 
 def protected_resource_payload(request: Request | None = None) -> dict[str, Any]:
-    """RFC 9728 metadata. `resource` follows GB_MCP_PUBLIC_URL when set."""
-    return {
-        "resource": mcp_resource_url(request),
-        "bearer_methods_supported": ["header"],
-        "resource_name": "gb-mcp-server",
-    }
+    """RFC 9728 metadata. `resource` and `authorization_servers` follow the public origin."""
+    return protected_resource_fields(mcp_resource_url(request), public_base_url(request))
 
 
 async def oauth_protected_resource(request: Request) -> Response:
@@ -78,8 +93,37 @@ async def oauth_protected_resource(request: Request) -> Response:
     )
 
 
-def authenticate_bearer(authorization: str | None) -> bool:
-    """Return True if the Authorization value is an accepted bearer token."""
+async def oauth_authorization_server(request: Request) -> Response:
+    return JSONResponse(
+        authorization_server_payload(public_base_url(request)),
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
+async def authorize_endpoint(request: Request) -> Response:
+    return await handle_authorize(
+        request,
+        issuer=public_base_url(request),
+        resource=mcp_resource_url(request),
+    )
+
+
+async def token_endpoint(request: Request) -> Response:
+    return await handle_token(request, resource=mcp_resource_url(request))
+
+
+async def register_endpoint(request: Request) -> Response:
+    return await handle_register(request)
+
+
+def authenticate_bearer(authorization: str | None, request: Request | None = None) -> bool:
+    """Return True if the Authorization value is an accepted bearer token.
+
+    Accepts the shared ``GB_MCP_BEARER_TOKEN``, an operator HS256 JWT signed
+    with ``GB_MCP_JWT_SECRET``, or an access token issued by this process's
+    authorization server. OAuth tokens must match this request's issuer and
+    resource (``aud``).
+    """
     if not authorization:
         return False
     scheme, _, credential = authorization.partition(" ")
@@ -89,14 +133,42 @@ def authenticate_bearer(authorization: str | None) -> bool:
     shared = config.bearer_token()
     if shared is not None and _constant_time_equals(token, shared):
         return True
-    secret = config.jwt_secret()
-    if secret is not None:
+    return _authenticate_jwt(token, request)
+
+
+def _authenticate_jwt(token: str, request: Request | None) -> bool:
+    operator_secret = config.jwt_secret()
+    if operator_secret is not None:
         try:
-            jwt.decode(token, secret, algorithms=_JWT_ALGORITHMS)
-            return True
+            claims = jwt.decode(
+                token,
+                operator_secret,
+                algorithms=_JWT_ALGORITHMS,
+                options={"verify_aud": False},
+            )
         except PyJWTError:
-            return False
-    return False
+            claims = None
+        if isinstance(claims, dict):
+            if "iss" in claims or "aud" in claims:
+                return _oauth_jwt_ok(claims, request)
+            return True
+
+    claims = decode_access_token_claims(token)
+    if claims is None:
+        return False
+    if "iss" in claims or "aud" in claims:
+        return _oauth_jwt_ok(claims, request)
+    return operator_secret is not None
+
+
+def _oauth_jwt_ok(claims: dict[str, Any], request: Request | None) -> bool:
+    if request is None:
+        return False
+    return oauth_claims_match_request(
+        claims,
+        issuer=public_base_url(request),
+        resource=mcp_resource_url(request),
+    )
 
 
 def _constant_time_equals(given: str, expected: str) -> bool:
@@ -110,8 +182,10 @@ def _constant_time_equals(given: str, expected: str) -> bool:
 def www_authenticate_value(request: Request) -> str:
     metadata = resource_metadata_url(request)
     return (
-        'Bearer realm="gb-mcp-server", error="invalid_token", '
+        'Bearer realm="gb-mcp-server", '
+        'error="invalid_token", '
         'error_description="Authentication required", '
+        f'scope="{MCP_SCOPE}", '
         f'resource_metadata="{metadata}"'
     )
 
@@ -148,11 +222,11 @@ class BearerAuthMiddleware:
             return
 
         headers = Headers(scope=scope)
-        if authenticate_bearer(headers.get("authorization")):
+        request = Request(scope, receive)
+        if authenticate_bearer(headers.get("authorization"), request):
             await self.app(scope, receive, send)
             return
 
-        request = Request(scope, receive)
         response = unauthorized_response(request)
         await response(scope, receive, send)
 
@@ -179,12 +253,23 @@ def _cors_middleware() -> Middleware | None:
 
 
 def attach_public_routes(mcp_server: MCPServer) -> None:
-    """Register unauthenticated HTTP routes (well-known metadata). Idempotent."""
+    """Register unauthenticated discovery and OAuth routes. Idempotent."""
     marker = id(mcp_server)
     if marker in _attached_servers:
         return
     _attached_servers.add(marker)
-    mcp_server.custom_route(_WELL_KNOWN_PATH, methods=["GET"])(oauth_protected_resource)
+    prm_path = path_aware_well_known("oauth-protected-resource")
+    as_path = path_aware_well_known("oauth-authorization-server")
+    mcp_server.custom_route(_WELL_KNOWN_PRM, methods=["GET"])(oauth_protected_resource)
+    if prm_path != _WELL_KNOWN_PRM:
+        mcp_server.custom_route(prm_path, methods=["GET"])(oauth_protected_resource)
+    mcp_server.custom_route(_WELL_KNOWN_AS, methods=["GET"])(oauth_authorization_server)
+    if as_path != _WELL_KNOWN_AS:
+        mcp_server.custom_route(as_path, methods=["GET"])(oauth_authorization_server)
+    mcp_server.custom_route(_WELL_KNOWN_OIDC, methods=["GET"])(oauth_authorization_server)
+    mcp_server.custom_route("/authorize", methods=["GET", "POST"])(authorize_endpoint)
+    mcp_server.custom_route("/token", methods=["POST"])(token_endpoint)
+    mcp_server.custom_route("/register", methods=["POST"])(register_endpoint)
 
 
 def create_http_app(mcp_server: MCPServer) -> Starlette:
@@ -193,6 +278,7 @@ def create_http_app(mcp_server: MCPServer) -> Starlette:
     `GB_MCP_PUBLIC_URL` is not required. DNS-rebinding Host allowlists are
     off because the public hostname is tunnel configuration, not app config.
     """
+    reset_oauth_state()
     attach_public_routes(mcp_server)
     path = config.http_path()
     app = mcp_server.streamable_http_app(

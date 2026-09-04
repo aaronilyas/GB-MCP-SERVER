@@ -74,7 +74,11 @@ def test_mcp_rejects_missing_bearer(http_client: TestClient) -> None:
     )
     assert response.status_code == 401
     assert "www-authenticate" in response.headers
-    assert response.headers["www-authenticate"].startswith("Bearer ")
+    www = response.headers["www-authenticate"]
+    assert www.startswith("Bearer ")
+    assert "resource_metadata=" in www
+    assert "error=" in www
+    assert "error_description=" in www
     body = response.json()
     assert body["error"] == "invalid_token"
     assert "result" not in body
@@ -182,7 +186,10 @@ def test_public_url_unset_does_not_crash(http_env, monkeypatch: pytest.MonkeyPat
     assert response.status_code == 200
     body = response.json()
     assert body["resource"] == "http://127.0.0.1:8080/mcp"
+    assert body["authorization_servers"] == ["http://127.0.0.1:8080"]
     assert body["bearer_methods_supported"] == ["header"]
+    assert body["scopes_supported"] == ["mcp"]
+    assert body["resource_name"] == "gb-mcp-server"
 
 
 def test_well_known_uses_public_url_when_set(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -199,10 +206,52 @@ def test_well_known_uses_public_url_when_set(http_env, monkeypatch: pytest.Monke
             json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
         )
     assert response.status_code == 200
-    assert response.json()["resource"] == "https://gb-mcp-server.com/mcp"
+    body = response.json()
+    assert body["resource"] == "https://gb-mcp-server.com/mcp"
+    assert body["authorization_servers"] == ["https://gb-mcp-server.com"]
     assert "https://gb-mcp-server.com/.well-known/oauth-protected-resource" in mcp_denied.headers[
         "www-authenticate"
     ]
+
+
+def test_protected_resource_metadata_is_served_at_root_and_path_aware(
+    http_client: TestClient,
+) -> None:
+    root = http_client.get("/.well-known/oauth-protected-resource")
+    path_aware = http_client.get("/.well-known/oauth-protected-resource/mcp")
+    assert root.status_code == 200
+    assert path_aware.status_code == 200
+    assert root.json() == path_aware.json()
+    assert root.json()["authorization_servers"]
+
+
+def test_authorization_server_metadata_advertises_pkce_and_dcr(
+    http_client: TestClient,
+) -> None:
+    paths = [
+        "/.well-known/oauth-authorization-server",
+        "/.well-known/oauth-authorization-server/mcp",
+        "/.well-known/openid-configuration",
+    ]
+    for path in paths:
+        response = http_client.get(path)
+        assert response.status_code == 200, path
+        body = response.json()
+        assert body["issuer"]
+        assert body["authorization_endpoint"].endswith("/authorize")
+        assert body["token_endpoint"].endswith("/token")
+        assert body["registration_endpoint"].endswith("/register")
+        assert body["code_challenge_methods_supported"] == ["S256"]
+        assert body["response_types_supported"] == ["code"]
+        assert "authorization_code" in body["grant_types_supported"]
+        assert "refresh_token" in body["grant_types_supported"]
+        assert body["token_endpoint_auth_methods_supported"] == ["none"]
+        assert "authorization_response_iss_parameter_supported" not in body
+
+
+def test_mcp_options_does_not_require_bearer(http_client: TestClient) -> None:
+    response = http_client.options("/mcp")
+    assert response.status_code != 401
 
 
 def test_jwt_bearer_is_accepted(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -247,10 +296,27 @@ def test_cors_does_not_reflect_arbitrary_origin_with_credentials(
             "/.well-known/oauth-protected-resource",
             headers={"Origin": "http://localhost:6274"},
         )
+        register_allowed = client.options(
+            "/register",
+            headers={
+                "Origin": "http://localhost:6274",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        authorize_allowed = client.options(
+            "/authorize",
+            headers={
+                "Origin": "http://localhost:6274",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
     assert allowed.headers.get("access-control-allow-origin") == "http://localhost:6274"
     assert allowed.headers.get("access-control-allow-credentials") in {None, "false"}
     assert rejected.headers.get("access-control-allow-origin") != "https://evil.example"
     assert get_allowed.headers.get("access-control-allow-credentials") in {None, "false"}
+    assert register_allowed.headers.get("access-control-allow-origin") == "http://localhost:6274"
+    assert authorize_allowed.headers.get("access-control-allow-origin") == "http://localhost:6274"
 
 
 def test_main_defaults_to_stdio(http_env, monkeypatch: pytest.MonkeyPatch) -> None:

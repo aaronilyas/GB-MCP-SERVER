@@ -12,7 +12,8 @@ and close after 5 minutes without input).
 
 Default transport is stdio (`python server.py`). Streamable HTTP is opt-in
 (`python server.py --http` or GB_MCP_TRANSPORT=streamable-http) and sits
-behind a bearer token; see README.md.
+behind dual transport auth: a static bearer / operator JWT, or MCP OAuth 2.1
+(authorization-code + PKCE) for hosted LLM connectors; see README.md.
 """
 
 from __future__ import annotations

@@ -7,9 +7,10 @@ SQLite (`user_subdirectories.sqlite3`). Mapped ROMs are played in a dedicated
 `gb-pyboy-instance` container per subdirectory.
 
 Email ↔ subdirectory mapping is application identity. It is **not** transport
-authentication. Remote HTTP clients authenticate with a bearer token; tools
-still take `email` arguments after that check succeeds. Do not ask the model
-to type the bearer token (or any password) into a tool.
+authentication. Remote HTTP clients authenticate with a bearer token **or**
+MCP OAuth 2.1; tools still take `email` arguments after that check succeeds.
+Do not ask the model to type the bearer token, a password, or an API key into
+a tool.
 
 ## Runtime
 
@@ -147,31 +148,91 @@ python server.py --http
 
 The process binds `0.0.0.0:8080` by default and serves MCP at `/mcp`.
 `GB_MCP_PUBLIC_URL` is **not** required at import or startup. When it is
-unset, absolute links and `/.well-known/oauth-protected-resource` derive the
-origin from the request `Host` header (`X-Forwarded-Proto` if present), then
-fall back to `http://127.0.0.1:8080`. Restarting with a new
+unset, absolute links, RFC 9728 / RFC 8414 metadata, and OAuth token `iss` /
+`aud` derive the origin from the request `Host` header (`X-Forwarded-Proto`
+if present), then fall back to `http://127.0.0.1:8080`. Restarting with a new
 `GB_MCP_PUBLIC_URL` is enough when the tunnel hostname changes. No hostname
-is hard-coded in source.
+is hard-coded in source. The issuer string is that origin with no trailing
+slash; it must match `authorization_servers` exactly.
 
 SSE responses use `Content-Type: text/event-stream` and are not buffered by
 this process. Cloudflare Tunnel buffers ordinary HTTP; it streams SSE. **Quick
 Tunnels (`*.trycloudflare.com` / `cloudflared tunnel --url`) do not support
 SSE** — use a named tunnel for a real MCP client.
 
-### Bearer token
+### Dual transport auth
 
-Every request to `/mcp` requires:
+Every request to `/mcp` except `OPTIONS` requires:
 
 ```
 Authorization: Bearer <token>
 ```
 
-`<token>` is either `GB_MCP_BEARER_TOKEN` (shared secret) or a JWT signed
-with `GB_MCP_JWT_SECRET` (HS256). Missing or invalid credentials return
-**401** with `WWW-Authenticate` and never run a tool body.
+`<token>` is one of:
 
-`GET /.well-known/oauth-protected-resource` is public. Its `resource` field
-is `${GB_MCP_PUBLIC_URL}/mcp` when `GB_MCP_PUBLIC_URL` is set.
+1. `GB_MCP_BEARER_TOKEN` (shared secret) — header-capable native clients
+2. A JWT signed with `GB_MCP_JWT_SECRET` (HS256) — same clients, operator-issued
+3. An access token from this process's OAuth authorization server — hosted LLM
+   connectors that cannot set a static header
+
+Missing or invalid credentials return **401** with `WWW-Authenticate`
+(`resource_metadata`, `error`, `error_description`) and never run a tool body.
+There is no query-string token.
+
+OAuth access tokens are HS256 JWTs with `iss` (public origin), `aud` (MCP
+resource URL), `exp`, `sub`, and `scope`. They are signed with
+`GB_MCP_JWT_SECRET` when that is set, otherwise with a key derived from
+`GB_MCP_BEARER_TOKEN`. HTTP mode still refuses to boot if neither variable is
+set.
+
+### Remote LLM clients / OAuth
+
+Hosted web UIs (ChatGPT custom connectors, Claude.ai custom connectors, Gemini
+custom MCP, Copilot Studio, and any other spec-compliant MCP host) cannot paste
+`Authorization: Bearer <GB_MCP_BEARER_TOKEN>`. They speak **MCP Authorization
+(OAuth 2.1)**: unauthenticated `initialize` → 401 → RFC 9728 protected-resource
+metadata → RFC 8414 (or OpenID Connect discovery) → Dynamic Client Registration
+→ authorization-code + PKCE S256 → Bearer access token on `/mcp`.
+
+Use the public MCP URL:
+
+```
+https://<public-host>/mcp
+```
+
+That host must be a **named** Cloudflare tunnel (or other reverse proxy that
+streams SSE). Quick tunnels (`*.trycloudflare.com`) still do not stream SSE.
+
+In the host UI, choose OAuth (not “no authentication”, not a pasted API key).
+Complete the consent page in the browser. Do **not** paste
+`GB_MCP_BEARER_TOKEN` into the connector or into a tool argument.
+
+This server implements MCP OAuth 2.1 so any spec-compliant host can connect.
+Claude Desktop / Cursor-style static bearer remains a supported alternative
+(next subsection).
+
+Unauthenticated discovery (any client must be able to `GET` these):
+
+| URL | Spec |
+| --- | --- |
+| `/.well-known/oauth-protected-resource` | RFC 9728 (root) |
+| `/.well-known/oauth-protected-resource/mcp` | RFC 9728 §3.1 path-aware |
+| `/.well-known/oauth-authorization-server` | RFC 8414 (root) |
+| `/.well-known/oauth-authorization-server/mcp` | RFC 8414 path-aware |
+| `/.well-known/openid-configuration` | OpenID Connect discovery alias |
+
+OAuth endpoints (also unauthenticated):
+
+| URL | Role |
+| --- | --- |
+| `GET` / `POST` `/authorize` | Authorization code + PKCE S256; HTML consent (Allow / Deny). No bearer token to paste. |
+| `POST` `/register` | RFC 7591 dynamic client registration (`201` + `client_id`; public client, `token_endpoint_auth_method=none`) |
+| `POST` `/token` | `authorization_code` and `refresh_token` (refresh tokens rotate) |
+
+Redirect URIs are exact matches against the URIs the client registered (host +
+path, never a string prefix). `http://127.0.0.1` and `http://localhost`
+loopback callbacks are accepted, as is any `https` callback the client
+registers (including hosted-connector callback hosts).
 
 ### Client config (Claude / Cursor / inspector)
 
@@ -216,7 +277,9 @@ header. Do not put the token in a tool argument.
 
 ### CORS
 
-Native clients (Claude Desktop, Cursor) do not use CORS. Browser clients do.
+Native clients (Claude Desktop, Cursor) do not use CORS. Browser clients
+(MCP Inspector, hosted OAuth in a browser) do. When set, CORS applies to
+`/mcp`, well-known metadata, and OAuth routes.
 
 | `GB_MCP_CORS_ORIGINS` | Effect |
 | --- | --- |
@@ -226,8 +289,8 @@ Native clients (Claude Desktop, Cursor) do not use CORS. Browser clients do.
 
 The server never sets `Access-Control-Allow-Credentials: true` and never
 reflects an arbitrary `Origin` with credentials. Allowed request headers
-include `Authorization`, `Content-Type`, `Accept`, `mcp-session-id`, and
-`mcp-protocol-version`.
+include `Authorization`, `Content-Type`, `Accept`, `mcp-session-id`,
+`mcp-protocol-version`, and `Last-Event-ID`.
 
 ## Cloudflare Tunnel
 
@@ -244,8 +307,10 @@ hard-coded in source. Finish these steps in the dashboard after copying
    `${TUNNEL_HOSTNAME}`; do not commit the copied file).
 4. Optionally set `GB_MCP_PUBLIC_URL=https://gb-mcp-server.com` and restart MCP
    (leave empty to derive the origin from `Host`).
-5. Point the LLM client at `https://gb-mcp-server.com/mcp` with the bearer
-   token (JSON above).
+5. Point header-capable clients at `https://gb-mcp-server.com/mcp` with the
+   bearer token (JSON above). Point hosted LLM UIs at the same MCP URL and
+   choose OAuth; they discover the authorization server from well-known
+   metadata and the consent page.
 6. Do not use `cloudflared tunnel --url` quick tunnels for MCP streaming.
 
 ```bash

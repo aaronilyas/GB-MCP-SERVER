@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import os
 from pathlib import Path
 
@@ -74,8 +76,23 @@ def jwt_secret() -> str | None:
     return _env("GB_MCP_JWT_SECRET") or None
 
 
+def token_signing_secret() -> str | None:
+    """HS256 key for OAuth access tokens (and operator JWTs when configured).
+
+    Prefer ``GB_MCP_JWT_SECRET``. If only ``GB_MCP_BEARER_TOKEN`` is set, derive
+    a stable key from it so hosted OAuth clients can still obtain JWTs.
+    """
+    secret = jwt_secret()
+    if secret:
+        return secret
+    bearer = bearer_token()
+    if not bearer:
+        return None
+    return hmac.new(b"gb-mcp-oauth-as", bearer.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
 def cors_origins() -> list[str]:
-    """Browser Origins allowed to call the HTTP MCP endpoint.
+    """Browser Origins allowed to call MCP, well-known, and OAuth HTTP routes.
 
     Empty means no CORS headers (native clients do not need them). ``*`` allows
     any Origin without credentials. Comma-separated list otherwise.
