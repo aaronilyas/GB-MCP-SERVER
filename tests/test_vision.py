@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from pathlib import Path
 
 import numpy as np
 from PIL import Image as PILImage
@@ -30,6 +31,14 @@ from gb_mcp.emulator.vision import (
 )
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+_FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+def _load_fixture(name: str) -> np.ndarray:
+    image = PILImage.open(_FIXTURES / name).convert("RGB")
+    arr = np.asarray(image, dtype=np.uint8)
+    assert arr.shape[:2] == (NATIVE_HEIGHT, NATIVE_WIDTH)
+    return arr
 
 
 def _solid(color: tuple[int, int, int]) -> np.ndarray:
@@ -57,6 +66,13 @@ def _battle() -> np.ndarray:
 def _start_menu(base: tuple[int, int, int] = (80, 160, 80)) -> np.ndarray:
     frame = _solid(base)
     frame[:, :80, :] = (248, 248, 248)
+    return frame
+
+
+def _start_menu_right(base: tuple[int, int, int] = (80, 160, 80)) -> np.ndarray:
+    """Gen 1 Start menu: light pane on the right half."""
+    frame = _solid(base)
+    frame[:, 80:, :] = (248, 248, 248)
     return frame
 
 
@@ -186,6 +202,11 @@ def test_until_monitor_default_hold_abort_on_start_menu() -> None:
     decision = UntilMonitor(play, overworld).evaluate(menu, 0)
     assert decision is not None
     assert decision.reason == "default_hold_abort"
+    right = _start_menu_right()
+    assert classify(right)["start_menu_likely"] is True
+    right_decision = UntilMonitor(play, overworld).evaluate(right, 0)
+    assert right_decision is not None
+    assert right_decision.reason == "default_hold_abort"
 
 
 def test_until_monitor_disable_default_hold_abort() -> None:
@@ -313,6 +334,43 @@ def test_start_menu_classifier_left_pane() -> None:
     assert flags["start_menu_likely"] is True
     assert flags["battle_likely"] is False
     assert classify(_solid((80, 160, 80)))["start_menu_likely"] is False
+
+
+def test_start_menu_classifier_right_pane() -> None:
+    flags = classify(_start_menu_right())
+    assert flags["start_menu_likely"] is True
+    assert flags["battle_likely"] is False
+    assert flags["textbox_likely"] is False
+
+
+def test_live_pallet_overworld_is_not_a_battle() -> None:
+    """Captured Pallet pavement LCD must not trip battle_likely (2026-09-05)."""
+    frame = _load_fixture("pallet_overworld.png")
+    flags = classify(frame)
+    assert flags["battle_likely"] is False
+    assert flags["textbox_likely"] is False
+    assert flags["start_menu_likely"] is False
+    assert flags["window_occluded_likely"] is False
+
+
+def test_live_start_menu_right_pane_from_pallet() -> None:
+    """Captured Gen 1 Start menu (POKéDEX first, right-hand pane)."""
+    frame = _load_fixture("start_menu_right.png")
+    flags = classify(frame)
+    assert flags["start_menu_likely"] is True
+    assert flags["battle_likely"] is False
+    assert flags["textbox_likely"] is False
+
+
+def test_hold_abort_ignores_scroll_on_live_pallet() -> None:
+    play = _hold_play()
+    base = _load_fixture("pallet_overworld.png")
+    monitor = UntilMonitor(play, base)
+    scrolled = np.roll(base, 8, axis=0)
+    assert pixel_delta_fraction(base, scrolled, DEFAULT_REGION) > 0.12
+    assert classify(base)["battle_likely"] is False
+    assert classify(scrolled)["battle_likely"] is False
+    assert monitor.evaluate(scrolled, 0) is None
 
 
 def test_capture_native_drops_alpha_and_falls_back_to_image() -> None:
