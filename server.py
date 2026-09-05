@@ -1431,11 +1431,16 @@ def _play_request_dict(
         "screenshot-derived framebuffer signals only (pixel delta, region hash, "
         "coarse classifiers) in native 160x144 space. There is NO memory, WRAM, "
         "map-id, party, or game-state tool; until is screenshot-derived. "
-        "Default speed is uncapped. A successful call resets the 45-minute idle "
-        "timer. After 45 minutes with no send_pyboy_input or ping_pyboy the "
-        "session auto-saves and PyBoy closes. If you will think longer than "
-        "about 30 seconds, call ping_pyboy (does not advance emulation or press "
-        "buttons)."
+        "Default speed is uncapped. Default macro=hold abort is two-gate: "
+        "full-screen pixel_delta > 0.12 AND (battle_likely or start_menu_likely "
+        "became true, or mean luminance jumped by > 80); disable_default_hold_abort "
+        "or until.on=none force-off. window_occluded_likely is diagnostic on "
+        "classifiers, not until.classifier. Replies that include email echo the "
+        "mapped caller, never the Docker placeholder 'instance'. A successful "
+        "call resets the 45-minute idle timer. After 45 minutes with no "
+        "send_pyboy_input or ping_pyboy the session auto-saves and PyBoy closes. "
+        "If you will think longer than about 30 seconds, call ping_pyboy (does "
+        "not advance emulation or press buttons)."
     ),
 )
 def send_pyboy_input(
@@ -1617,8 +1622,9 @@ def send_pyboy_input(
                 "region_hash_eq | region_hash_neq | classifier | none; "
                 "threshold (default 0.08); stable_frames (default 12); hash "
                 "(hex, required for region_hash_*); classifier = textbox_likely "
-                "| battle_likely | start_menu_likely; classifier_polarity = "
-                "appears | disappears. until.on=none disables default hold abort."
+                "| battle_likely | start_menu_likely (not window_occluded_likely); "
+                "classifier_polarity = appears | disappears. until.on=none "
+                "disables default hold abort."
             ),
         ),
     ] = None,
@@ -1638,9 +1644,10 @@ def send_pyboy_input(
         Field(
             default=False,
             description=(
-                "If true, do not stop a hold macro on full-screen pixel_delta "
-                "vs the start-of-call frame (threshold 0.12). until.on=none "
-                "also disables it."
+                "If true, do not apply the default two-gate hold abort on "
+                "macro=hold (full-screen pixel_delta > 0.12 AND battle_likely "
+                "or start_menu_likely became true, or mean luminance jumped by "
+                "> 80). until.on=none also disables it."
             ),
         ),
     ] = False,
@@ -1732,7 +1739,8 @@ def send_pyboy_input(
         "you will think longer than about 30 seconds; otherwise the session "
         "auto-saves and closes after 45 minutes with no send_pyboy_input or "
         "ping_pyboy. Returns alive, idle_timeout_seconds, and "
-        "seconds_since_last_input."
+        "seconds_since_last_input. Replies that include email echo the mapped "
+        "caller, never the Docker placeholder 'instance'."
     ),
 )
 def ping_pyboy(
@@ -1776,9 +1784,11 @@ def ping_pyboy(
         "stopping. That file is save_state output for resume, not cartridge "
         "battery. It is not a substitute for reset_pyboy. The 32-character "
         "subdirectory name is required. Email may be omitted when the OAuth "
-        "access token has an email or sub claim. Returns saved: true. "
-        "stop_pyboy and idle timeout write the snapshot, then stop(save=True) "
-        "flushes cartridge SRAM (rom.gb.ram). Live save_ram is optional."
+        "access token has an email or sub claim. Returns saved: true. Replies "
+        "that include email echo the mapped caller, never the Docker "
+        "placeholder 'instance'. stop_pyboy and idle timeout write the "
+        "snapshot, then stop(save=True) flushes cartridge SRAM (rom.gb.ram). "
+        "Live save_ram is optional."
     ),
 )
 def save_battery(
@@ -1992,7 +2002,14 @@ default 4). `screenshot_mode`: final (default), all, interrupt_and_final,
 keyframes.
 
 `until` is screenshot-derived only (native 160x144 pixel delta, region hash,
-coarse classifiers). There is no game-state tool.
+coarse classifiers). There is no game-state tool. `until.classifier` is
+textbox_likely | battle_likely | start_menu_likely (`battle_likely` is Gen 1
+fight LCD only; use it for grass → fight takeover). `window_occluded_likely`
+is diagnostic on the response `classifiers` object, not an until classifier.
+Default `macro=hold` abort is two-gate (full-screen pixel_delta > 0.12 AND
+battle/start appeared or luma jump > 80); `disable_default_hold_abort` and
+`until.on=none` still force-off. Replies that include `email` echo the
+mapped caller, never `"instance"`.
 
 A successful call resets the 45-minute idle timer.
 
@@ -2002,7 +2019,8 @@ A successful call resets the 45-minute idle timer.
 token has an email or sub claim. Resets the idle timer. Does not
 advance emulation and does not press buttons. Call this if you will think
 longer than about 30 seconds. Returns `alive`, `idle_timeout_seconds`,
-`seconds_since_last_input`.
+`seconds_since_last_input`. Replies that include `email` echo the mapped
+caller, never `"instance"`.
 
 ### 7. save_battery
 
@@ -2010,6 +2028,7 @@ longer than about 30 seconds. Returns `alive`, `idle_timeout_seconds`,
 token has an email or sub claim. Writes the PyBoy snapshot
 (`rom.gb.state`) and leaves PyBoy running. That file is not cartridge
 battery. It is not a substitute for `reset_pyboy`. Returns `saved: true`.
+Replies that include `email` echo the mapped caller, never `"instance"`.
 `stop_pyboy` and idle timeout write the snapshot, then `stop(save=True)`
 flushes cartridge SRAM (`rom.gb.ram`). Live `save_ram` is optional.
 

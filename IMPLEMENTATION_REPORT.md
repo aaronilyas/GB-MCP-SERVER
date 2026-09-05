@@ -7,10 +7,24 @@ roughly 80–150 decision turns.
 ## Later play fixes (2026-09-05)
 
 - `reset_pyboy` with `discard_state=true` unlinks the PyBoy snapshot and cold-boots.
-  `.state` is not cartridge battery.
-- A successful `load_state` ticks **8 settle frames** with buttons released.
-- Intermediate `tick(n, render=False)` is **capped at 4**; a new button chord
-  renders before any `render=False` batch.
+  `.state` is not cartridge battery. A successful `load_state` ticks **8 settle
+  frames** (`tick(1, render=True)` each) with buttons released. Intermediate
+  `tick(n, render=False)` is **capped at 4**; a new button chord renders before
+  any `render=False` batch.
+- `battle_likely` is a Gen 1 fight-LCD heuristic (HP-bar-like strips in the
+  enemy/player slots; rejected when `textbox_likely` or `start_menu_likely` is
+  already true). Pallet-like overworld and Route-like grass without takeover
+  are false. Use `until.classifier=battle_likely` only for grass → fight LCD
+  takeover.
+- Default `macro=hold` abort is **two-gate**: full-frame `pixel_delta` > 0.12
+  **and** (`battle_likely` or `start_menu_likely` became true vs start-of-call,
+  or mean luminance jumped by > 80). Camera scroll / 1–3 tile walks do not
+  abort; battle takeover, Start menu, and warp fade do. Disable with
+  `disable_default_hold_abort: true` or `until.on: "none"`.
+- `window_occluded_likely` on the response `classifiers` object is diagnostic
+  only (not `until.classifier`, does not abort input).
+- `save_battery` / `ping_pyboy` / `send_pyboy_input` replies that include
+  `email` echo the mapped caller, never the Docker placeholder `"instance"`.
 
 ## How to call the new `send_pyboy_input` macros
 
@@ -43,10 +57,12 @@ Prefer one-tile steps. Do not hold a d-pad for 3600 frames across a door.
 bounds, call `reset_pyboy` with `discard_state=true` and start a new game; do
 not keep restoring a poisoned `.state`.
 
-If `until` is omitted, a **default hold abort** still fires on full-screen
-`pixel_delta_above` with threshold **0.12** versus the **start-of-call** native
-frame, so “hold Up through grass” cannot grind a wild battle with Up stuck.
-Disable with `disable_default_hold_abort: true` or `until.on: "none"`.
+If `until` is omitted, a **default hold abort** still applies on `macro=hold`.
+It is two-gate versus the **start-of-call** native frame: full-screen
+`pixel_delta` > 0.12 **and** (`battle_likely` or `start_menu_likely` became
+true, or mean luminance jumped by > 80). Camera scroll and 1–3 tile walks do
+not abort; battle takeover, Start menu, and warp fade do. Disable with
+`disable_default_hold_abort: true` or `until.on: "none"`.
 
 ### Mash A until the dialogue box is stable
 
@@ -83,7 +99,7 @@ Keep-alive without moving the character: `ping_pyboy`. Save without stopping:
 | idle timeout | 2700 s (45 min); env `GB_PYBOY_IDLE_TIMEOUT_SECONDS` |
 | `until_eval_interval` | 4 (range 1–15) |
 | caller `until.threshold` | 0.08 |
-| default hold abort | full-screen delta **> 0.12** vs start-of-call, on `macro=hold` |
+| default hold abort | two-gate on `macro=hold`: full-screen delta **> 0.12** AND (`battle_likely` / `start_menu_likely` became true, or luma jump **> 80**) |
 | pixel_delta baseline | start-of-call native frame (not previous eval) |
 | `stable` baseline | previous **evaluated** frame |
 | region hash | `blake2s(native RGB crop bytes, digest_size=8)` hex |
@@ -107,19 +123,27 @@ applied on the instance before the tool returns.
 
 ## Known classifier failure modes
 
-Coarse pixel heuristics on the native 160×144 buffer. Prefer false positives
-on `battle_likely` over missing a wild encounter; default hold abort is the
-real safety net for grass.
+Coarse pixel heuristics on the native 160×144 buffer (synthetic fixtures, not
+ROM dumps). `window_occluded_likely` is diagnostic only.
 
 - **textbox_likely** — bottom 48px needs a dark frame and a much lighter inner
   window. Misses unframed / light-bordered text. A full-bottom white slab does
   not fire.
-- **battle_likely** — top-vs-bottom color split and/or 2–10px light status bars.
-  Over-triggers on any two-band + bar layout. Misses battles with no split and
-  no thin light bars. Thick dialogue windows are not treated as bars.
+- **battle_likely** — Gen 1 fight LCD: thin HP-bar-like strips in the enemy
+  (upper) and player (lower) slots, or two such strips with a top/bottom
+  color split. False when `textbox_likely` or `start_menu_likely` is already
+  true. False on Pallet-like overworld (tree belt vs pavement, fences/ledges)
+  and Route-like grass without fight takeover. Use
+  `until.classifier=battle_likely` for grass → fight LCD takeover only — not
+  for walking, textboxes, or the Start menu. Misses fights with no slotted
+  HP-bar strips and no two-strip split. Thick dialogue windows are not bars.
 - **start_menu_likely** — left ~80px mostly very light over most of the height,
   rest different. Misses right-hand or dark menus. A full-white screen does not
   fire.
+- **window_occluded_likely** — large near-black rectangle (≥25% of the LCD)
+  while the rest still looks like a room. Not `until.classifier`; does not
+  abort input. Full-screen fade-to-black is not a slab. A real Gen 1 textbox
+  is `textbox_likely`, not occluded.
 
 `center` hash box `[40,32,80,80]` overlaps the top 16px of a Gen 1 dialogue
 window (`y≥96`). `bottom` still changes more than `center` on a dialogue-bar
@@ -146,12 +170,13 @@ fixture.
   the overworld. After map/boot, agents must `ping_pyboy` if they will think
   > ~30s (45-minute idle is the hard close). One live session per email:
   switching games saves and stops the old instance.
-- **Default hold abort (0.12)** stops a grass hold on a large full-screen
-  change (wild battle / map transition). A very subtle fade might not trip
-  0.12; callers should still pass `until` for dialogue (`stable` on the bottom
-  box) and battles (`classifier: battle_likely` or full-screen delta).
-- **Classifiers are not ROM-tuned.** Do not rely on `battle_likely` alone;
-  combine with `pixel_delta_above` / default hold abort.
+- **Default two-gate hold abort** stops a grass hold on fight LCD takeover,
+  Start menu, or a fade-sized luma jump — not on ordinary camera scroll.
+  Callers should still pass `until` for dialogue (`stable` on the bottom box)
+  and grass → fight (`classifier: battle_likely`).
+- **Classifiers are coarse LCD geometry, not ROM-tuned.** `battle_likely` is
+  false on Pallet / Route grass without takeover; do not use it to interrupt
+  walking. `window_occluded_likely` is diagnostic only.
 - **20s call timeout** is plenty for 3600 uncapped frames on a normal CPU;
   at `emulation_speed=1` the timeout scales up to 70s.
 - This server does not play the game. Reaching Brock in 80–150 turns still

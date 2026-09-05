@@ -97,6 +97,25 @@ with `GB_PYBOY_IDLE_TIMEOUT_SECONDS` (default 2700).
   loop does not tick (this is correct).
 - `save_battery` does not replace `reset_pyboy`.
 
+### Play loop signals
+
+Screenshot-derived flags on the native 160×144 LCD. There is no memory or
+game-state tool.
+
+- `battle_likely` is true only on a Gen 1 fight LCD (HP-bar-like strips in
+  the enemy/player slots). It is false on Pallet / Route grass without
+  takeover, interiors, the Start menu, and textboxes.
+- `until.classifier=battle_likely` is for grass → fight LCD takeover only.
+  Do not use it to interrupt walking, dialogue, or Start.
+- Default `macro=hold` abort is two-gate: full-frame `pixel_delta` > 0.12
+  **and** (`battle_likely` or `start_menu_likely` became true, or mean
+  luminance jumped by > 80). Camera scroll / 1–3 tile walks do not abort.
+  `disable_default_hold_abort=true` and `until.on=none` still force-off.
+- `window_occluded_likely` is diagnostic on the response `classifiers`
+  object. It is not an `until.classifier` and does not abort input.
+- `save_battery` / `ping_pyboy` / `send_pyboy_input` replies that include
+  `email` echo the mapped caller, never the Docker placeholder `"instance"`.
+
 ### Agent ingest contract
 
 - Default decoded chunk size is **8 KiB**. `begin_gb_rom_upload` returns
