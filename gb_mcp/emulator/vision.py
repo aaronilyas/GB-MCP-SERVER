@@ -38,16 +38,17 @@ _TEXTBOX_INNER_MIN = 180.0
 _TEXTBOX_CONTRAST_MIN = 80.0
 _BATTLE_SPLIT_MIN = 25.0
 _BAR_ROW_LUM_MIN = 190.0
-_BAR_MIN_WIDTH_FRAC = 0.35
-# Full-width fence/ledge rows are not HP bars (bars sit in a status slot).
-_BAR_MAX_WIDTH_FRAC = 0.90
+# Contiguous HP-bar run length in native pixels (Gen 1 bar track ~48px).
+# Row-mean fraction matched Pallet pavement and house-window rows.
+_BAR_MIN_RUN = 40
+_BAR_MAX_RUN = 112
 _BAR_THICKNESS = (2, 10)
-_MENU_X1 = 80
 _MENU_LIGHT_MIN = 200.0
 _MENU_LIGHT_FRAC = 0.55
 _MENU_HEIGHT_FRAC = 0.70
 _MENU_ROW_LIGHT_FRAC = 0.60
-_MENU_PANE_DELTA = 40.0
+# Pallet Start (right pane) vs overworld is ~26 lum; overworld halves differ ~7.
+_MENU_PANE_DELTA = 20.0
 
 # Stale GB window: a large near-black rectangle while the rest still looks like a room.
 _OCCLUDE_BLACK_LUM = 24.0
@@ -193,12 +194,33 @@ def _textbox_likely(rgb: np.ndarray) -> bool:
     )
 
 
+def _longest_bright_run(row: np.ndarray) -> int:
+    """Longest consecutive run of True in a 1-d mask."""
+    best = 0
+    current = 0
+    for flag in row.tolist():
+        if flag:
+            current += 1
+            if current > best:
+                best = current
+        else:
+            current = 0
+    return best
+
+
 def _light_horizontal_strips(lum: np.ndarray) -> list[tuple[int, int]]:
-    """Thin bright status-bar-like row runs (height 2–10, not full-width)."""
+    """Thin compact HP-bar runs (height 2–10), not pavement or full-width ledges."""
     if lum.size == 0:
         return []
-    row_frac = (lum >= _BAR_ROW_LUM_MIN).mean(axis=1)
-    is_bar = (row_frac >= _BAR_MIN_WIDTH_FRAC) & (row_frac <= _BAR_MAX_WIDTH_FRAC)
+    width = int(lum.shape[1])
+    scale = width / float(NATIVE_WIDTH) if width else 1.0
+    min_run = max(1, int(round(_BAR_MIN_RUN * scale)))
+    max_run = max(min_run, int(round(_BAR_MAX_RUN * scale)))
+    bright = lum >= _BAR_ROW_LUM_MIN
+    is_bar = np.array(
+        [min_run <= _longest_bright_run(row) <= max_run for row in bright],
+        dtype=bool,
+    )
     strips: list[tuple[int, int]] = []
     start: int | None = None
     for index, flag in enumerate(is_bar.tolist()):
@@ -246,21 +268,33 @@ def _battle_likely(rgb: np.ndarray) -> bool:
     return float(centers[-1] - centers[0]) >= float(third)
 
 
-def _start_menu_likely(rgb: np.ndarray) -> bool:
-    """Vertical left-hand light pane covering most of the height; rest different."""
-    left = rgb[:, :_MENU_X1]
-    right = rgb[:, _MENU_X1:]
-    left_lum = _luminance(left)
-    right_lum = _luminance(right)
-    light = left_lum >= _MENU_LIGHT_MIN
+def _menu_pane_likely(pane: np.ndarray, rest: np.ndarray) -> bool:
+    """Light vertical pane covering most of the height, brighter than the rest."""
+    if pane.size == 0 or rest.size == 0:
+        return False
+    pane_lum = _luminance(pane)
+    rest_lum = _luminance(rest)
+    light = pane_lum >= _MENU_LIGHT_MIN
     if float(light.mean()) < _MENU_LIGHT_FRAC:
         return False
     row_frac = light.mean(axis=1)
     if float((row_frac >= _MENU_ROW_LIGHT_FRAC).mean()) < _MENU_HEIGHT_FRAC:
         return False
-    if abs(float(left_lum.mean()) - float(right_lum.mean())) < _MENU_PANE_DELTA:
+    pane_mean = float(pane_lum.mean())
+    rest_mean = float(rest_lum.mean())
+    if pane_mean - rest_mean < _MENU_PANE_DELTA:
         return False
     return True
+
+
+def _start_menu_likely(rgb: np.ndarray) -> bool:
+    """Vertical light pane on the left or right (Gen 1 Start is right-hand)."""
+    if rgb.ndim != 3 or rgb.shape[1] < 2:
+        return False
+    mid = max(1, rgb.shape[1] // 2)
+    left = rgb[:, :mid]
+    right = rgb[:, mid:]
+    return _menu_pane_likely(left, right) or _menu_pane_likely(right, left)
 
 
 def _largest_near_black_rect(
