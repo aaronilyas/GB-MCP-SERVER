@@ -9,8 +9,12 @@ from pathlib import Path
 
 from gb_mcp.gb.constants import MAX_ROM_BYTES
 
-# Decoded bytes per append_gb_rom_upload chunk (~32 KiB base64 at 24 KiB).
-DEFAULT_ROM_UPLOAD_CHUNK_BYTES = 24 * 1024
+# Decoded bytes per append_gb_rom_upload chunk (~11 KiB base64 at 8 KiB).
+# 24 KiB decoded (~32 KiB base64) is truncated by hosted MCP connectors.
+DEFAULT_ROM_UPLOAD_CHUNK_BYTES = 8 * 1024
+# Caps for append_gb_rom_upload_batch (one MCP call).
+ROM_UPLOAD_BATCH_MAX_CHUNKS = 16
+ROM_UPLOAD_BATCH_MAX_BYTES = 64 * 1024
 ROM_UPLOAD_TTL_SECONDS = 30 * 60
 
 ROOT = Path(__file__).resolve().parent.parent

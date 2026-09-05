@@ -67,6 +67,7 @@ from gb_mcp.storage.roms import (
 from gb_mcp.storage.uploads import (
     abort_upload,
     append_chunk,
+    append_chunks,
     begin_upload,
     delete_upload,
     expire_uploads,
@@ -80,8 +81,10 @@ mcp = MCPServer(
         "isolated Docker container with no internet access, and saves only "
         "confirmed .gb/.gbc files under a unique 32-character subdirectory of "
         "roms/. submit_gb_rom is for small homebrew that fits in one base64 "
-        "argument. 1 MiB dumps must use begin_gb_rom_upload, append_gb_rom_upload, "
-        "and finalize_gb_rom_upload (abort_gb_rom_upload deletes in-flight "
+        "argument. 1 MiB dumps must use begin_gb_rom_upload, "
+        "append_gb_rom_upload_batch (preferred; do not send 24 KiB single chunks "
+        "through LLM tool args), optional append_gb_rom_upload, and "
+        "finalize_gb_rom_upload (abort_gb_rom_upload deletes in-flight "
         "staging). Optional subdirectory plus email on submit or finalize "
         "replaces the ROM in an owned mapping in place (same 32-hex id). After "
         "a ROM passes validation the server "
@@ -399,8 +402,9 @@ def _persist_map_boot(
         "+ playable size) runs with no internet; on success the file is saved "
         "under roms/<32-hex>/. Use this only for ROMs that fit in a single "
         "connector argument. 1 MiB dumps must use begin_gb_rom_upload / "
-        "append_gb_rom_upload / finalize_gb_rom_upload instead of one "
-        "rom_base64. Optional subdirectory (32-hex) plus email replaces the "
+        "append_gb_rom_upload_batch / finalize_gb_rom_upload instead of one "
+        "rom_base64. Use batch append; do not send 24 KiB single chunks through "
+        "LLM tool args. Optional subdirectory (32-hex) plus email replaces the "
         ".gb/.gbc in that owned mapping in place (same id); omitted "
         "subdirectory allocates a new name. Unmapped, other-owned, or invalid "
         "hex names are rejected and nothing is persisted. Pass boot=true to "
@@ -533,10 +537,12 @@ def submit_gb_rom(
         "as a single submit_gb_rom rom_base64 argument (1 MiB dumps often exceed "
         "connector limits). Provide filename, total_bytes, and sha256 of the "
         "complete file. Returns upload_id and chunk_size (decoded bytes per "
-        "append; default 24 KiB, override with GB_ROM_UPLOAD_CHUNK_BYTES). Then "
-        "call append_gb_rom_upload for consecutive chunks and "
-        "finalize_gb_rom_upload. Isolated Docker validation still runs on the "
-        "assembled bytes. Does not read a host filesystem path."
+        "slice; default 8 KiB, override with GB_ROM_UPLOAD_CHUNK_BYTES). Then "
+        "call append_gb_rom_upload_batch for consecutive slices (preferred) or "
+        "append_gb_rom_upload for one slice, then finalize_gb_rom_upload. Use "
+        "batch append; do not send 24 KiB single chunks through LLM tool args "
+        "(hosted connectors truncate them). Isolated Docker validation still "
+        "runs on the assembled bytes. Does not read a host filesystem path."
     ),
 )
 def begin_gb_rom_upload(
@@ -581,10 +587,13 @@ def begin_gb_rom_upload(
     name="append_gb_rom_upload",
     description=(
         "Append the next consecutive chunk of a ROM started with "
-        "begin_gb_rom_upload. chunk_index is 0-based and must equal next_index "
+        "begin_gb_rom_upload. Prefer append_gb_rom_upload_batch: do not send "
+        "24 KiB single chunks through LLM tool args (hosted connectors "
+        "truncate them). chunk_index is 0-based and must equal next_index "
         "from the previous append (holes are rejected). chunk_base64 is one "
-        "slice of at most chunk_size decoded bytes. Returns received_bytes and "
-        "next_index. Call finalize_gb_rom_upload after the last chunk."
+        "slice of at most chunk_size decoded bytes (default 8 KiB). Returns "
+        "received_bytes and next_index. Call finalize_gb_rom_upload after the "
+        "last chunk."
     ),
 )
 def append_gb_rom_upload(
@@ -611,6 +620,58 @@ def append_gb_rom_upload(
         "received_bytes": appended["received_bytes"],
         "next_index": appended["next_index"],
         "total_bytes": appended["total_bytes"],
+    }
+
+
+@mcp.tool(
+    name="append_gb_rom_upload_batch",
+    description=(
+        "Append several consecutive ROM chunks in one call. Prefer this over "
+        "append_gb_rom_upload: use batch append; do not send 24 KiB single "
+        "chunks through LLM tool args (hosted MCP connectors and agent shells "
+        "truncate ~32 KiB base64). start_index is 0-based and must equal "
+        "next_index (holes are rejected). chunks_base64 is a list of base64 "
+        "slices, each at most chunk_size decoded bytes (default 8 KiB). At most "
+        "16 chunks and 64 KiB decoded per call. Returns received_bytes, "
+        "next_index, and chunks_accepted. Call finalize_gb_rom_upload after "
+        "the last chunk. Does not read a host filesystem path."
+    ),
+)
+def append_gb_rom_upload_batch(
+    upload_id: str,
+    start_index: int,
+    chunks_base64: Annotated[
+        list[str],
+        Field(
+            description=(
+                "Consecutive base64 slices starting at start_index. Each slice "
+                "is at most chunk_size decoded bytes (default 8 KiB). At most "
+                "16 entries and 64 KiB decoded total. Prefer many 8 KiB slices "
+                "over one 24 KiB chunk."
+            ),
+        ),
+    ],
+) -> dict[str, Any]:
+    """Append consecutive decoded chunks to a staging upload in one call."""
+    try:
+        appended = append_chunks(
+            upload_id=upload_id,
+            start_index=start_index,
+            chunks_base64=chunks_base64,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "appended": False,
+            "upload_id": upload_id,
+            "error": str(exc),
+        }
+    return {
+        "appended": True,
+        "upload_id": appended["upload_id"],
+        "received_bytes": appended["received_bytes"],
+        "next_index": appended["next_index"],
+        "total_bytes": appended["total_bytes"],
+        "chunks_accepted": appended["chunks_accepted"],
     }
 
 
@@ -1605,15 +1666,18 @@ filesystem path or a sandbox attachment path into `rom_base64`.
 Optional `subdirectory` (32-hex) plus `email` overwrites an owned mapping in
 place (same id) instead of allocating a new name.
 
-### 1b. begin_gb_rom_upload / append_gb_rom_upload / finalize_gb_rom_upload / abort_gb_rom_upload
+### 1b. begin_gb_rom_upload / append_gb_rom_upload_batch / append_gb_rom_upload / finalize_gb_rom_upload / abort_gb_rom_upload
 
 Use this chunked flow for a 1 MiB (or up to 8 MiB) dump that cannot fit in
-one `rom_base64` argument.
+one `rom_base64` argument. Use batch append; do not send 24 KiB single chunks
+through LLM tool args (hosted connectors truncate ~32 KiB base64).
 
 1. `begin_gb_rom_upload(filename, total_bytes, sha256, email?)` →
-   `{upload_id, chunk_size}` (`chunk_size` default 24576 decoded bytes).
-2. `append_gb_rom_upload(upload_id, chunk_index, chunk_base64)` for each
-   consecutive slice (`chunk_index` starts at 0; holes are rejected).
+   `{upload_id, chunk_size}` (`chunk_size` default 8192 decoded bytes).
+2. `append_gb_rom_upload_batch(upload_id, start_index, chunks_base64)` for
+   consecutive slices (`start_index` starts at 0; holes are rejected). Each
+   list entry is at most `chunk_size` decoded bytes; at most 16 chunks and
+   64 KiB decoded per call. `append_gb_rom_upload` remains for a single slice.
 3. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?, subdirectory?)`
    concatenates, verifies sha256 and length, runs the same isolated validator,
    persists, optionally maps and boots. Same result shape as `submit_gb_rom`.

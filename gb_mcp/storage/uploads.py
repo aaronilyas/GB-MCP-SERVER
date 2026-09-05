@@ -179,61 +179,155 @@ def begin_upload(
     }
 
 
-def append_chunk(
-    *,
-    upload_id: str,
-    chunk_index: int,
-    chunk_base64: str,
-) -> dict[str, Any]:
+def _validate_chunk_index(chunk_index: int, *, name: str = "chunk_index") -> int:
     if isinstance(chunk_index, bool) or not isinstance(chunk_index, int):
-        raise ValueError("chunk_index must be an integer")
+        raise ValueError(f"{name} must be an integer")
     if chunk_index < 0:
-        raise ValueError("chunk_index must be an integer >= 0")
+        raise ValueError(f"{name} must be an integer >= 0")
+    return chunk_index
+
+
+def _decode_chunk(chunk_base64: str, chunk_size: int) -> bytes:
     if not isinstance(chunk_base64, str) or not chunk_base64:
         raise ValueError("chunk_base64 is required")
-    with _LOCK:
-        expire_uploads()
-        dest, meta = _load_live(upload_id)
-        expected_index = int(meta["next_index"])
-        if chunk_index != expected_index:
-            raise ValueError(
-                f"expected chunk_index {expected_index}, got {chunk_index} "
-                "(holes are not allowed)"
-            )
-        chunk_size = int(meta["chunk_size"])
-        max_b64 = (chunk_size + 2) // 3 * 4 + 16
-        if len(chunk_base64) > max_b64:
-            raise ValueError("chunk exceeds the configured chunk_size")
-        try:
-            data = base64.b64decode(chunk_base64, validate=True)
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"invalid base64 chunk: {exc}") from None
-        if not data:
-            raise ValueError("chunk is empty")
-        if len(data) > chunk_size:
-            raise ValueError(
-                f"chunk is {len(data)} bytes; maximum is {chunk_size} decoded bytes"
-            )
-        received = int(meta["received_bytes"]) + len(data)
-        total = int(meta["total_bytes"])
-        if received > total:
-            raise ValueError(
-                f"received_bytes {received} would exceed total_bytes {total}"
-            )
-        data_path = dest / "data.bin"
-        with data_path.open("ab") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        meta["received_bytes"] = received
-        meta["next_index"] = chunk_index + 1
-        _write_meta(dest, meta)
+    max_b64 = (chunk_size + 2) // 3 * 4 + 16
+    if len(chunk_base64) > max_b64:
+        raise ValueError("chunk exceeds the configured chunk_size")
+    try:
+        data = base64.b64decode(chunk_base64, validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"invalid base64 chunk: {exc}") from None
+    if not data:
+        raise ValueError("chunk is empty")
+    if len(data) > chunk_size:
+        raise ValueError(
+            f"chunk is {len(data)} bytes; maximum is {chunk_size} decoded bytes"
+        )
+    return data
+
+
+def _apply_decoded_chunk(
+    dest: Path,
+    meta: dict[str, Any],
+    *,
+    chunk_index: int,
+    data: bytes,
+) -> dict[str, Any]:
+    """Write one already-decoded chunk. Caller must hold ``_LOCK``."""
+    expected_index = int(meta["next_index"])
+    if chunk_index != expected_index:
+        raise ValueError(
+            f"expected chunk_index {expected_index}, got {chunk_index} "
+            "(holes are not allowed)"
+        )
+    received = int(meta["received_bytes"]) + len(data)
+    total = int(meta["total_bytes"])
+    if received > total:
+        raise ValueError(
+            f"received_bytes {received} would exceed total_bytes {total}"
+        )
+    data_path = dest / "data.bin"
+    with data_path.open("ab") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    meta["received_bytes"] = received
+    meta["next_index"] = chunk_index + 1
+    _write_meta(dest, meta)
     return {
         "received_bytes": received,
         "next_index": chunk_index + 1,
         "total_bytes": total,
         "upload_id": meta["upload_id"],
     }
+
+
+def _rollback_upload(dest: Path, meta_before: dict[str, Any], size_before: int) -> None:
+    data_path = dest / "data.bin"
+    with data_path.open("r+b") as fh:
+        fh.truncate(size_before)
+        fh.flush()
+        os.fsync(fh.fileno())
+    _write_meta(dest, meta_before)
+
+
+def append_chunk(
+    *,
+    upload_id: str,
+    chunk_index: int,
+    chunk_base64: str,
+) -> dict[str, Any]:
+    chunk_index = _validate_chunk_index(chunk_index)
+    if not isinstance(chunk_base64, str) or not chunk_base64:
+        raise ValueError("chunk_base64 is required")
+    with _LOCK:
+        expire_uploads()
+        dest, meta = _load_live(upload_id)
+        data = _decode_chunk(chunk_base64, int(meta["chunk_size"]))
+        return _apply_decoded_chunk(
+            dest, meta, chunk_index=chunk_index, data=data
+        )
+
+
+def append_chunks(
+    *,
+    upload_id: str,
+    start_index: int,
+    chunks_base64: list[str],
+) -> dict[str, Any]:
+    """Apply consecutive chunks in one call. Holds ``_LOCK`` for the whole batch."""
+    start_index = _validate_chunk_index(start_index, name="start_index")
+    if not isinstance(chunks_base64, list):
+        raise ValueError("chunks_base64 must be a list of base64 strings")
+    if not chunks_base64:
+        raise ValueError("chunks_base64 must be a non-empty list")
+    max_chunks = config.ROM_UPLOAD_BATCH_MAX_CHUNKS
+    if len(chunks_base64) > max_chunks:
+        raise ValueError(
+            f"batch has {len(chunks_base64)} chunks; maximum is {max_chunks}"
+        )
+    for item in chunks_base64:
+        if not isinstance(item, str) or not item:
+            raise ValueError(
+                "each chunk in chunks_base64 must be a non-empty base64 string"
+            )
+
+    with _LOCK:
+        expire_uploads()
+        dest, meta = _load_live(upload_id)
+        chunk_size = int(meta["chunk_size"])
+        max_batch_bytes = config.ROM_UPLOAD_BATCH_MAX_BYTES
+        decoded: list[bytes] = []
+        total_decoded = 0
+        for item in chunks_base64:
+            data = _decode_chunk(item, chunk_size)
+            total_decoded += len(data)
+            if total_decoded > max_batch_bytes:
+                raise ValueError(
+                    f"batch decoded size {total_decoded} exceeds maximum of "
+                    f"{max_batch_bytes} bytes"
+                )
+            decoded.append(data)
+
+        data_path = dest / "data.bin"
+        size_before = data_path.stat().st_size
+        meta_before = dict(meta)
+        try:
+            result = _apply_decoded_chunk(
+                dest, meta, chunk_index=start_index, data=decoded[0]
+            )
+            for offset, data in enumerate(decoded[1:], start=1):
+                result = _apply_decoded_chunk(
+                    dest,
+                    meta,
+                    chunk_index=start_index + offset,
+                    data=data,
+                )
+            result["chunks_accepted"] = len(decoded)
+            return result
+        except Exception:
+            _rollback_upload(dest, meta_before, size_before)
+            raise
 
 
 def take_assembled(upload_id: str) -> tuple[bytes, dict[str, Any]]:

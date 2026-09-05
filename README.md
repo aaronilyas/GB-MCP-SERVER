@@ -52,9 +52,10 @@ Docker dump.
 
 | Tool | Purpose |
 | --- | --- |
-| `submit_gb_rom` | Small homebrew only: one base64 ROM; isolated Docker validation; persist on success. Optional `subdirectory`+`email` replaces an owned mapping in place. Optional `boot=true` starts PyBoy after a mapped submit. 1 MiB dumps must use begin/append/finalize |
+| `submit_gb_rom` | Small homebrew only: one base64 ROM; isolated Docker validation; persist on success. Optional `subdirectory`+`email` replaces an owned mapping in place. Optional `boot=true` starts PyBoy after a mapped submit. 1 MiB dumps must use begin/batch-append/finalize |
 | `begin_gb_rom_upload` | Start a chunked upload (`filename`, `total_bytes`, `sha256`) → `{upload_id, chunk_size}` |
-| `append_gb_rom_upload` | Append the next consecutive decoded chunk (`chunk_index` + `chunk_base64`) |
+| `append_gb_rom_upload` | Append the next consecutive decoded chunk (`chunk_index` + `chunk_base64`). Prefer `append_gb_rom_upload_batch` |
+| `append_gb_rom_upload_batch` | Append consecutive chunks in one call (`start_index` + `chunks_base64`); cap 16 chunks / 64 KiB decoded |
 | `finalize_gb_rom_upload` | Verify sha256/length, run the same isolated validator, persist, optional map/boot. Optional `subdirectory`+`email` overwrites that owned mapping in place |
 | `abort_gb_rom_upload` | Cancel an in-flight chunked upload and delete staging |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
@@ -80,17 +81,21 @@ Hosted MCP connectors and LLM tool-argument caps often cannot carry a 1 MiB
 ROM as a single `submit_gb_rom.rom_base64` string (~1.4 MiB of base64). The
 server limit (`MAX_ROM_B64_CHARS`, ~11M characters for 8 MiB decoded) is not
 the problem — the transport is. Do **not** work around this by reading a
-host filesystem path. Use the three-tool ingest:
+host filesystem path. Use the chunked ingest:
 
 1. SHA-256 the complete `.gb` / `.gbc` and note `total_bytes` (1,048,576 for
    a 1 MiB dump).
 2. `begin_gb_rom_upload(filename, total_bytes, sha256, email?)` →
-   `{upload_id, chunk_size}`. Default `chunk_size` is 24 KiB decoded
-   (~32 KiB base64). Override with `GB_ROM_UPLOAD_CHUNK_BYTES`.
+   `{upload_id, chunk_size}`. Default `chunk_size` is 8 KiB decoded
+   (~11 KiB base64). Override with `GB_ROM_UPLOAD_CHUNK_BYTES`. Do **not**
+   send 24 KiB single chunks through LLM tool args; hosted connectors
+   truncate ~32 KiB base64.
 3. Split the file into consecutive slices of at most `chunk_size` bytes.
-   For each slice `i = 0, 1, …` call
-   `append_gb_rom_upload(upload_id, i, chunk_base64)`. Holes, oversized
-   chunks, and `received_bytes > total_bytes` are rejected.
+   Prefer `append_gb_rom_upload_batch(upload_id, start_index, chunks_base64)`
+   with up to 16 slices / 64 KiB decoded per call. Single-slice
+   `append_gb_rom_upload(upload_id, i, chunk_base64)` still works. Holes,
+   oversized chunks or batches, and `received_bytes > total_bytes` are
+   rejected.
 4. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?, subdirectory?)`
    concatenates the staging files under `roms/.uploads/<upload_id>/` (mode
    `0700`), verifies sha256 and length, then runs the **same** isolated
