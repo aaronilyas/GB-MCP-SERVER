@@ -19,14 +19,14 @@ from gb_mcp.emulator.backend import (
     InstanceHandle,
     _dead_message,
 )
-from gb_mcp.emulator.loop import (
+from gb_mcp.emulator.loop import PyBoyFactory
+from gb_mcp.emulator.play_limits import (
     BUTTONS,
     DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
     MAX_HOLD_FRAMES,
     MAX_INPUT_STEPS,
     SCREENSHOT_MODES,
-    PyBoyFactory,
 )
 
 _SUBMIT_OPS = frozenset({"input", "ping", "save"})

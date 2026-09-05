@@ -75,9 +75,7 @@ def execute_play_command(
         result.setdefault("interrupt_frame_index", plan.interrupt_frame_index)
     if play.ocr:
         result.update(_maybe_ocr(result.get("pngs") or []))
-    return strip_forbidden_keys(result) | (
-        {"pngs": result["pngs"]} if "pngs" in result else {}
-    )
+    return strip_forbidden_keys(result)
 
 
 def _maybe_ocr(pngs: list[bytes]) -> dict[str, Any]:

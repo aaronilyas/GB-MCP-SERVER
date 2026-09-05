@@ -11,12 +11,14 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from gb_mcp.emulator.loop import (
-    DEFAULT_EMULATION_SPEED,
-    INPUT_COMMAND_TIMEOUT_SECONDS,
     EmulatorSession,
     PyBoyFactory,
     _default_pyboy_factory,
     _state_path_for_rom,
+)
+from gb_mcp.emulator.play_limits import (
+    DEFAULT_EMULATION_SPEED,
+    INPUT_COMMAND_TIMEOUT_SECONDS,
 )
 
 

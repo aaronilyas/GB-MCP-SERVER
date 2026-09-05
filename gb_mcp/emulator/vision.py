@@ -1,6 +1,7 @@
 """Framebuffer interrupts and screenshot packaging. Implemented by sub-agent B.
 
-See docs/AGENT_CONTRACT.md. Must not read emulator memory.
+The public contract is defined by input_schema and play_limits. Must not read
+emulator memory.
 """
 
 from __future__ import annotations

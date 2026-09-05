@@ -1,8 +1,8 @@
 # Implementation report: screenshot-only play loop
 
-Branch: `feat/screenshot-play-loop`. Target: an LLM can play Pallet Town → Brock
-in ≤75 minutes wall-clock on average using screenshots only, with roughly 80–150
-decision turns.
+Landed on `main` in `571331c` (2026-09-04). Target: an LLM can play Pallet Town
+→ Brock in ≤75 minutes wall-clock on average using screenshots only, with
+roughly 80–150 decision turns.
 
 ## How to call the new `send_pyboy_input` macros
 
@@ -118,7 +118,7 @@ fixture.
 
 | Area | Files |
 | --- | --- |
-| Contract | `docs/AGENT_CONTRACT.md`, `gb_mcp/emulator/play_limits.py`, `gb_mcp/emulator/input_schema.py` |
+| Contract | `docs/history/AGENT_CONTRACT.md`, `gb_mcp/emulator/play_limits.py`, `gb_mcp/emulator/input_schema.py` |
 | Engine | `gb_mcp/emulator/input_engine.py`, `gb_mcp/emulator/play_runtime.py` |
 | Vision | `gb_mcp/emulator/vision.py` |
 | OCR | `gb_mcp/emulator/ocr.py` |

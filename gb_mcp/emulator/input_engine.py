@@ -1,4 +1,4 @@
-"""PyBoy tick + button scheduler. See docs/AGENT_CONTRACT.md."""
+"""PyBoy tick + button scheduler; input_schema and play_limits define its contract."""
 
 from __future__ import annotations
 

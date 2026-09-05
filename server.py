@@ -706,8 +706,9 @@ def _play_request_dict(
         "the 32-character subdirectory name are required. One mode per call: a "
         "single chord (`buttons` + optional `hold_frames`), an ordered `steps` "
         "list, top-level `wait=true`, or `macro` hold|mash|steps|buttons. Do "
-        "not pass a non-empty top-level buttons list together with a non-empty "
-        "steps list. Empty wait steps (`steps: [{buttons: [], hold_frames: n}]` "
+        "not pass a non-empty top-level buttons list together with any `steps` "
+        "list (including an empty one). Empty wait steps "
+        "(`steps: [{buttons: [], hold_frames: n}]` "
         "or `wait: true`) are allowed; top-level `buttons=[]` without wait/macro "
         "is not. Valid buttons: a, b, start, select, up, down, left, right. "
         f"At most {MAX_INPUT_STEPS} steps; hold_frames is 1..{MAX_HOLD_FRAMES}; "
@@ -754,7 +755,8 @@ def send_pyboy_input(
                 "Single-chord Game Boy buttons to press together (macro=buttons). "
                 "Each value must be one of: a, b, start, select, up, down, left, "
                 "right. Omit when passing steps or wait=true. Cannot be combined "
-                "with a non-empty steps list. Top-level buttons=[] without "
+                "with steps (including an empty list). Top-level buttons=[] "
+                "without "
                 "wait/macro is an error."
             ),
         ),
@@ -1360,4 +1362,3 @@ def main(argv: list[str] | None = None) -> None:
 
 if __name__ == "__main__":
     main()
-

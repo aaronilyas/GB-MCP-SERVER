@@ -25,11 +25,13 @@ from gb_mcp.emulator.backend import (
     play_container_name,
 )
 from gb_mcp.emulator.loop import (
-    DEFAULT_EMULATION_SPEED,
-    INPUT_COMMAND_TIMEOUT_SECONDS,
     _state_path_for_rom,
     overlay_status,
     shape_status,
+)
+from gb_mcp.emulator.play_limits import (
+    DEFAULT_EMULATION_SPEED,
+    INPUT_COMMAND_TIMEOUT_SECONDS,
 )
 from gb_mcp.isolation import docker as isolation
 

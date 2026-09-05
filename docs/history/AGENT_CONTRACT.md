@@ -1,7 +1,8 @@
-# Agent contract: screenshot-only play loop
+# Historical implementation contract: screenshot-only play loop
 
-Lead-owned. Sub-agents implement against this file. Public JSON names here win
-if a sub-agent's local names drift.
+Archived coordination record for the play-loop work that landed on `main` in
+`571331c` (2026-09-04). The living public contract is README.md together with
+`gb_mcp.emulator.play_limits` and `gb_mcp.emulator.input_schema`.
 
 ## Non-negotiable
 

@@ -20,12 +20,14 @@ from pathlib import Path
 from typing import Any
 
 from gb_mcp.emulator.loop import (
-    DEFAULT_EMULATION_SPEED,
-    INPUT_COMMAND_TIMEOUT_SECONDS,
     EmulatorSession,
     _default_pyboy_factory,
 )
-from gb_mcp.emulator.play_limits import DEFAULT_IDLE_TIMEOUT_SECONDS
+from gb_mcp.emulator.play_limits import (
+    DEFAULT_EMULATION_SPEED,
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    INPUT_COMMAND_TIMEOUT_SECONDS,
+)
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = int(os.environ.get("GB_INSTANCE_PORT", "8080"))
