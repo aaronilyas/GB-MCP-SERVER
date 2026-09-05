@@ -48,6 +48,7 @@ class DockerInstanceBackend:
         *,
         idle_timeout_seconds: float,
         emulation_speed: int = DEFAULT_EMULATION_SPEED,
+        restore_state: bool = True,
     ) -> InstanceHandle:
         try:
             assert_rom_playable(rom_path)
@@ -72,6 +73,7 @@ class DockerInstanceBackend:
             rom_path,
             idle_timeout_seconds=idle_timeout_seconds,
             emulation_speed=emulation_speed,
+            restore_state=restore_state,
         )
         created = isolation._run_docker(args, timeout=60)
         if created.returncode != 0:
@@ -151,6 +153,16 @@ class DockerInstanceBackend:
             raise RuntimeError(str(remote["error"]))
         return remote
 
+    def discard_state(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
+        if not _container_running(handle.container_name):
+            raise InstanceDeadError(_dead_message(_exit_close_reason(handle.container_name)))
+        remote = _rpc(
+            handle.container_name, "POST", "/discard_state", {}, timeout=int(timeout) + 5
+        )
+        if remote.get("error") and "discarded" not in remote:
+            raise RuntimeError(str(remote["error"]))
+        return remote
+
     def request_stop(self, handle: InstanceHandle, reason: str) -> None:
         if not _container_running(handle.container_name):
             return
@@ -192,6 +204,7 @@ def play_create_args(
     *,
     idle_timeout_seconds: float,
     emulation_speed: int = DEFAULT_EMULATION_SPEED,
+    restore_state: bool = True,
     image: str | None = None,
 ) -> list[str]:
     """Return `docker run` args for a locked-down play instance.
@@ -246,6 +259,8 @@ def play_create_args(
         f"GB_PYBOY_IDLE_TIMEOUT_SECONDS={int(idle_timeout_seconds)}",
         "-e",
         f"GB_PYBOY_EMULATION_SPEED={int(emulation_speed)}",
+        "-e",
+        f"GB_INSTANCE_RESTORE_STATE={'1' if restore_state else '0'}",
         "-e",
         "PYTHONUNBUFFERED=1",
         "-e",

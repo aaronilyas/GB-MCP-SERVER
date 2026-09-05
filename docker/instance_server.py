@@ -116,6 +116,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._send_json(session.status(**result))
             return
+        if self.path == "/discard_state":
+            try:
+                result = session.submit("discard_state", timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json(
+                    {"discarded": False, "restored_state": False, "error": str(exc)},
+                    400,
+                )
+                return
+            self._send_json(session.status(**result))
+            return
         if self.path == "/stop":
             reason = str(body.get("reason") or "requested")
             session.request_stop(reason)
@@ -209,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
         emulation_speed = int(speed_raw)
     except ValueError:
         emulation_speed = DEFAULT_EMULATION_SPEED
+    restore_state = os.environ.get("GB_INSTANCE_RESTORE_STATE", "1").strip() != "0"
     session = EmulatorSession(
         email="instance",
         subdirectory=subdirectory,
@@ -216,6 +228,7 @@ def main(argv: list[str] | None = None) -> int:
         pyboy_factory=_default_pyboy_factory,
         idle_timeout_seconds=idle,
         emulation_speed=emulation_speed,
+        restore_state=restore_state,
     )
     STATE.session = session
     session.start()

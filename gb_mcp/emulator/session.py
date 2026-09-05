@@ -29,7 +29,7 @@ from gb_mcp.emulator.play_limits import (
     SCREENSHOT_MODES,
 )
 
-_SUBMIT_OPS = frozenset({"input", "ping", "save"})
+_SUBMIT_OPS = frozenset({"input", "ping", "save", "discard_state"})
 
 
 class PlaySession:
@@ -159,6 +159,7 @@ class PlaySession:
         if self.close_reason and "close_reason" not in payload:
             payload["close_reason"] = self.close_reason
         payload.update(extra)
+        payload["email"] = self.email
         return payload
 
     def request_stop(self, reason: str = "requested") -> None:
@@ -184,6 +185,8 @@ class PlaySession:
             return self._backend.ping(self._handle, timeout=timeout)
         if op == "save":
             return self._backend.save(self._handle, timeout=timeout)
+        if op == "discard_state":
+            return self._backend.discard_state(self._handle, timeout=timeout)
         extra = {key: value for key, value in payload.items() if key not in {"steps", "screenshot_mode"}}
         return self._backend.send_input(
             self._handle,
@@ -251,6 +254,7 @@ class SessionManager:
         *,
         emulation_speed: int | None = None,
         idle_timeout_seconds: float | None = None,
+        restore_state: bool = True,
     ) -> dict[str, Any]:
         switched_from: str | None = None
         current: PlaySession | None = None
@@ -285,6 +289,7 @@ class SessionManager:
                     rom_path,
                     idle_timeout_seconds=idle,
                     emulation_speed=speed,
+                    restore_state=restore_state,
                 )
             except InstanceDeadError as exc:
                 return {
@@ -405,6 +410,20 @@ class SessionManager:
             return session.status(saved=False, error=str(exc))
         except Exception as exc:  # noqa: BLE001
             return session.status(saved=False, error=_tool_error(exc))
+        return session.status(**result)
+
+    def discard_state(self, email: str, subdirectory: str) -> dict[str, Any]:
+        session = self._require_running(email, subdirectory)
+        if isinstance(session, dict):
+            payload = dict(session)
+            payload.pop("sent", None)
+            return payload
+        try:
+            result = session.submit("discard_state", timeout=10)
+        except InstanceDeadError as exc:
+            return session.status(discarded=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return session.status(discarded=False, error=_tool_error(exc))
         return session.status(**result)
 
     def stop(self, email: str, subdirectory: str) -> dict[str, Any]:

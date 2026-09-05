@@ -91,10 +91,16 @@ def shape_status(
 
 
 def overlay_status(base: dict[str, Any], remote: dict[str, Any]) -> dict[str, Any]:
-    """Copy selected fields from a remote instance status onto a host payload."""
+    """Copy selected fields from a remote instance status onto a host payload.
+
+    The instance process hardcodes ``email="instance"``; keep the MCP host email.
+    """
+    host_email = base.get("email")
     for key in REMOTE_STATUS_KEYS:
         if key in remote:
             base[key] = remote[key]
+    if host_email is not None:
+        base["email"] = host_email
     return base
 
 
@@ -167,6 +173,7 @@ class EmulatorSession:
         pyboy_factory: PyBoyFactory,
         idle_timeout_seconds: float,
         emulation_speed: int = DEFAULT_EMULATION_SPEED,
+        restore_state: bool = True,
     ) -> None:
         self.email = email
         self.subdirectory = subdirectory
@@ -177,6 +184,7 @@ class EmulatorSession:
         self.restore_error: str | None = None
         self.close_reason: str | None = None
         self.saved = False
+        self._restore_state = bool(restore_state)
         self._pyboy_factory = pyboy_factory
         self._idle_timeout = idle_timeout_seconds
         self._emulation_speed = (
@@ -273,6 +281,9 @@ class EmulatorSession:
         if command.op == "save":
             command.complete(self._apply_save())
             return
+        if command.op == "discard_state":
+            command.complete(self._apply_discard_state())
+            return
         if command.op == "stop":
             self.close_reason = command.payload.get("reason", "requested")
             self._stop_requested.set()
@@ -300,6 +311,23 @@ class EmulatorSession:
         self._save_snapshot()
         self._try_save_cartridge_sram()
         return {"saved": True}
+
+    def _apply_discard_state(self) -> dict[str, Any]:
+        """Unlink ``rom.gb.state`` if present. Does not tick or stop PyBoy.
+
+        Cartridge SRAM (``rom.gb.ram``) is left alone.
+        """
+        discarded = False
+        try:
+            self.state_path.unlink()
+            discarded = True
+        except FileNotFoundError:
+            discarded = False
+        except OSError:
+            discarded = False
+        self.restored_state = False
+        self.saved = False
+        return {"discarded": discarded, "restored_state": False}
 
     def _apply_input(self, payload: dict[str, Any]) -> dict[str, Any]:
         # Lazy import: vision/numpy live in the play instance, not the MCP host image.
@@ -367,6 +395,8 @@ class EmulatorSession:
                 continue
 
     def _restore_snapshot(self, pyboy: Any) -> None:
+        if not self._restore_state:
+            return
         if not (self.state_path.is_file() and self.state_path.stat().st_size > 0):
             return
         try:

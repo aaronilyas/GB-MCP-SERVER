@@ -65,6 +65,7 @@ class InstanceBackend(Protocol):
         *,
         idle_timeout_seconds: float,
         emulation_speed: int = DEFAULT_EMULATION_SPEED,
+        restore_state: bool = True,
     ) -> InstanceHandle: ...
 
     def is_running(self, handle: InstanceHandle) -> bool: ...
@@ -89,6 +90,13 @@ class InstanceBackend(Protocol):
     ) -> dict[str, Any]: ...
 
     def save(
+        self,
+        handle: InstanceHandle,
+        *,
+        timeout: float = 10,
+    ) -> dict[str, Any]: ...
+
+    def discard_state(
         self,
         handle: InstanceHandle,
         *,
@@ -122,6 +130,7 @@ class InProcessBackend:
         *,
         idle_timeout_seconds: float,
         emulation_speed: int = DEFAULT_EMULATION_SPEED,
+        restore_state: bool = True,
     ) -> InstanceHandle:
         try:
             assert_rom_playable(rom_path)
@@ -134,6 +143,7 @@ class InProcessBackend:
             pyboy_factory=self._pyboy_factory,
             idle_timeout_seconds=idle_timeout_seconds,
             emulation_speed=emulation_speed,
+            restore_state=restore_state,
         )
         session.start()
         session.wait_ready()
@@ -184,6 +194,9 @@ class InProcessBackend:
 
     def save(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
         return self._live_session(handle).submit("save", timeout=timeout)
+
+    def discard_state(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
+        return self._live_session(handle).submit("discard_state", timeout=timeout)
 
     def request_stop(self, handle: InstanceHandle, reason: str) -> None:
         if handle.session is not None:

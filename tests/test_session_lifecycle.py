@@ -8,7 +8,11 @@ import pytest
 import db
 from gb_mcp import config
 from gb_mcp.emulator.backend import FakeInstanceBackend
-from gb_mcp.emulator.loop import POST_RESTORE_SETTLE_FRAMES, _ram_path_for_rom
+from gb_mcp.emulator.loop import (
+    POST_RESTORE_SETTLE_FRAMES,
+    _ram_path_for_rom,
+    overlay_status,
+)
 from gb_mcp.emulator.play_limits import BUTTONS
 from gb_mcp.emulator.session import SessionManager
 from gb_mcp.storage.roms import _state_path_for_rom
@@ -266,3 +270,114 @@ def test_save_battery_writes_sram_when_save_ram_exists(
     assert _ram_path_for_rom(rom_path).read_bytes() == b"FAKERAM"
     assert created[0].stopped is False
     assert created[0].saved_ram is False
+
+
+def test_load_restore_state_false_skips_existing_snapshot(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    _state_path_for_rom(rom_path).write_bytes(b"FAKESTATE")
+    _ram_path_for_rom(rom_path).write_bytes(b"FAKERAM")
+    created: list[FakePyBoy] = []
+
+    def factory(path: Path) -> FakePyBoy:
+        instance = FakePyBoy(path)
+        created.append(instance)
+        return instance
+
+    pyboy_manager._backend._pyboy_factory = factory
+    result = pyboy_manager.load(
+        "owner@example.com", name, rom_path, restore_state=False
+    )
+    assert result["running"] is True
+    assert result["started"] is True
+    assert result["restored_state"] is False
+    assert "restore_error" not in result
+    assert result["email"] == "owner@example.com"
+    assert created[0].loaded_state is None
+    assert created[0].ticks == 0
+    assert _state_path_for_rom(rom_path).read_bytes() == b"FAKESTATE"
+    assert _ram_path_for_rom(rom_path).read_bytes() == b"FAKERAM"
+
+    time.sleep(0.05)
+    assert created[0].ticks == 0
+    pinged = pyboy_manager.ping("owner@example.com", name)
+    assert pinged["alive"] is True
+    assert pinged["email"] == "owner@example.com"
+    assert created[0].ticks == 0
+
+
+def test_load_restore_state_false_does_not_restart_running_session(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    first = pyboy_manager.load("owner@example.com", name, rom_path)
+    assert first["already_running"] is False
+    session = pyboy_manager.get("owner@example.com")
+    assert session is not None
+    pyboy = session._pyboy
+    second = pyboy_manager.load(
+        "owner@example.com", name, rom_path, restore_state=False
+    )
+    assert second["already_running"] is True
+    assert second["started"] is True
+    assert pyboy_manager.get("owner@example.com") is session
+    assert session._pyboy is pyboy
+
+
+def test_discard_state_unlinks_snapshot_leaves_sram_and_pyboy(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    _state_path_for_rom(rom_path).write_bytes(b"FAKESTATE")
+    _ram_path_for_rom(rom_path).write_bytes(b"FAKERAM")
+    loaded = pyboy_manager.load("owner@example.com", name, rom_path)
+    assert loaded["restored_state"] is True
+    session = pyboy_manager.get("owner@example.com")
+    assert session is not None
+    pyboy = session._pyboy
+    ticks_before = pyboy.ticks
+    buttons_before = list(pyboy.buttons)
+
+    result = pyboy_manager.discard_state("owner@example.com", name)
+    assert result["discarded"] is True
+    assert result["restored_state"] is False
+    assert result["email"] == "owner@example.com"
+    assert result["running"] is True
+    assert not _state_path_for_rom(rom_path).exists()
+    assert _ram_path_for_rom(rom_path).read_bytes() == b"FAKERAM"
+    assert pyboy.stopped is False
+    assert pyboy.ticks == ticks_before
+    assert pyboy.buttons == buttons_before
+    assert session.is_running is True
+
+    again = pyboy_manager.discard_state("owner@example.com", name)
+    assert again["discarded"] is False
+    assert again["restored_state"] is False
+    assert not _state_path_for_rom(rom_path).exists()
+    assert _ram_path_for_rom(rom_path).read_bytes() == b"FAKERAM"
+    assert pyboy.stopped is False
+    assert pyboy.ticks == ticks_before
+
+    sent = pyboy_manager.send_input("owner@example.com", name, ["a"])
+    assert sent["sent"] is True
+    assert sent["email"] == "owner@example.com"
+
+
+def test_status_keeps_host_email_over_instance_placeholder(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    loaded = pyboy_manager.load("owner@example.com", name, rom_path)
+    assert loaded["email"] == "owner@example.com"
+    session = pyboy_manager.get("owner@example.com")
+    assert session is not None
+    leaked = session.status(email="instance")
+    assert leaked["email"] == "owner@example.com"
+    overlaid = overlay_status(
+        {"email": "owner@example.com", "running": True},
+        {"email": "instance", "restored_state": True},
+    )
+    assert overlaid["email"] == "owner@example.com"
+    assert overlaid["restored_state"] is True
+    assert overlaid["running"] is True
