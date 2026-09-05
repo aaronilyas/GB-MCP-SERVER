@@ -57,10 +57,11 @@ Docker dump.
 | Tool | Purpose |
 | --- | --- |
 | `submit_gb_rom` | Small homebrew only: one base64 ROM; isolated Docker validation; persist on success. Optional `subdirectory`+`email` replaces an owned mapping in place. Optional `boot=true` starts PyBoy after a mapped submit. 1 MiB dumps must use begin/batch-append/finalize |
-| `begin_gb_rom_upload` | Start a chunked upload (`filename`, `total_bytes`, `sha256`) → `{upload_id, chunk_size}` |
+| `begin_gb_rom_upload` | Start a chunked upload (`filename`, `total_bytes`, `sha256`) → `{upload_id, chunk_size}` (default 8 KiB decoded) |
+| `get_gb_rom_upload` | Safe progress for an in-flight upload (`next_index`, `received_bytes`, `chunk_size`); resume after a truncated append |
 | `append_gb_rom_upload` | Append the next consecutive decoded chunk (`chunk_index` + `chunk_base64`). Prefer `append_gb_rom_upload_batch` |
 | `append_gb_rom_upload_batch` | Append consecutive chunks in one call (`start_index` + `chunks_base64`); cap 16 chunks / 64 KiB decoded |
-| `finalize_gb_rom_upload` | Verify sha256/length, run the same isolated validator, persist, optional map/boot. Optional `subdirectory`+`email` overwrites that owned mapping in place |
+| `finalize_gb_rom_upload` | Verify sha256/length, run the same isolated validator, persist, optional map/boot. 1 MiB dumps: `finalize(..., email, boot=true)`. Optional `subdirectory`+`email` overwrites that owned mapping in place |
 | `abort_gb_rom_upload` | Cancel an in-flight chunked upload and delete staging |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
 | `list_subdirectories_for_email` | List that user's games and header metadata, including `playable` |
@@ -75,9 +76,25 @@ classifiers are derived from the native 160×144 LCD. Default
 `emulation_speed` is `0` (uncapped). Screenshots are nearest-neighbor
 upscaled (`screenshot_scale` default 4 → 640×576). Idle sessions auto-save
 to the volume and remove the container after **45 minutes** without
-`send_pyboy_input` or `ping_pyboy`. Agents should call `ping_pyboy` if they
-will think longer than about 30 seconds. Override idle with
-`GB_PYBOY_IDLE_TIMEOUT_SECONDS` (default 2700).
+`send_pyboy_input` or `ping_pyboy`. After map/boot, agents should call
+`ping_pyboy` if they will think longer than about 30 seconds. Override idle
+with `GB_PYBOY_IDLE_TIMEOUT_SECONDS` (default 2700).
+
+### Agent ingest contract
+
+- Default decoded chunk size is **8 KiB**. `begin_gb_rom_upload` returns
+  `chunk_size`; override with `GB_ROM_UPLOAD_CHUNK_BYTES`.
+- **1 MiB Pokémon dumps:** `begin_gb_rom_upload` → batch
+  `append_gb_rom_upload_batch` → `finalize_gb_rom_upload(..., email, boot=true)`.
+- Never put ~32 KiB of base64 in a single tool argument if the client is an
+  LLM. Hosted connectors truncate it. Prefer 8 KiB slices via batch append;
+  do not send a 24 KiB decoded single chunk.
+- **No host-path ingest.** Never read a host or sandbox attachment path into
+  `rom_base64` or chunk arguments.
+- After map/boot, call `ping_pyboy` if think time is greater than about 30
+  seconds.
+- One live session per email.
+- Play is screenshot-only. There is no memory or game-state tool.
 
 ### Chunked ROM upload (1 MiB and up)
 
@@ -91,9 +108,10 @@ host filesystem path. Use the chunked ingest:
    a 1 MiB dump).
 2. `begin_gb_rom_upload(filename, total_bytes, sha256, email?)` →
    `{upload_id, chunk_size}`. Default `chunk_size` is 8 KiB decoded
-   (~11 KiB base64). Override with `GB_ROM_UPLOAD_CHUNK_BYTES`. Do **not**
-   send 24 KiB single chunks through LLM tool args; hosted connectors
-   truncate ~32 KiB base64.
+   (~11 KiB base64). Override with `GB_ROM_UPLOAD_CHUNK_BYTES`. Never put
+   ~32 KiB of base64 in a single tool argument if the client is an LLM;
+   hosted connectors truncate it. Do **not** send 24 KiB decoded single
+   chunks through LLM tool args.
 3. If an append times out or its response is truncated, call
    `get_gb_rom_upload(upload_id)` and resume at its returned `next_index`.
    The progress response contains no staging paths or ROM bytes. Retrying the
@@ -104,15 +122,17 @@ host filesystem path. Use the chunked ingest:
    `append_gb_rom_upload(upload_id, i, chunk_base64)` still works. Holes,
    oversized chunks or batches, and `received_bytes > total_bytes` are
    rejected.
-5. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?, subdirectory?)`
-   concatenates the staging files under `roms/.uploads/<upload_id>/` (mode
-   `0700`), verifies sha256 and length, then runs the **same** isolated
-   validator (`container up first`, ROM bytes on stdin `docker exec`,
+5. For a 1 MiB Pokémon dump,
+   `finalize_gb_rom_upload(upload_id, email=..., boot=true)` concatenates
+   the staging files under `roms/.uploads/<upload_id>/` (mode `0700`),
+   verifies sha256 and length, then runs the **same** isolated validator
+   (`container up first`, ROM bytes on stdin `docker exec`,
    `--network=none`). On success the ROM is persisted under `roms/<32-hex>/`
    and mapped/booted like `submit_gb_rom`. Staging is always deleted. Call
    `abort_gb_rom_upload(upload_id)` to drop an in-flight upload without
    persisting. Abandoned uploads expire after 30 minutes; listing a user's
-   games also reclaims expired staging.
+   games also reclaims expired staging. After map/boot, call `ping_pyboy` if
+   think time will exceed about 30 seconds.
 6. To replace an unplayable mapping (`list_subdirectories_for_email` shows
    `playable: false`, for example a 1 KiB Pokémon header), pass the existing
    32-hex id: `finalize_gb_rom_upload(upload_id, email=..., subdirectory=<id>)`.
@@ -131,7 +151,7 @@ argument.
 | `gb://users/{email}/roms` | Owned ROM list and game metadata |
 | `gb://users/{email}/roms/{subdirectory}` | Cartridge header metadata for an owned ROM |
 | `gb://users/{email}/session` | Live play-instance status for that email |
-| `gb://usage` | How a connected model should use this server (submit, map, list, load, play, ping, save, stop). Contains no user data. |
+| `gb://usage` | How a connected model should use this server (chunked ingest, map, list, load, play, ping, save, stop). Contains no user data. |
 
 ## Compose
 

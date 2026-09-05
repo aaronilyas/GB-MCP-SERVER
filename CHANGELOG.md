@@ -19,3 +19,7 @@
 - `submit_gb_rom` and `finalize_gb_rom_upload` accept optional `subdirectory` plus `email` to atomically overwrite the `.gb`/`.gbc` in an owned mapping (same 32-hex id). Unmapped, other-owned, or invalid hex names are rejected and nothing is persisted. A truncated sibling is deleted so load cannot boot the 1 KiB dump. `load_subdirectory_rom` calls `assert_rom_playable` before any play instance starts and names the finalize-with-subdirectory repair path.
 - Abandoned staging under `roms/.uploads/` expires after 30 minutes. `list_subdirectories_for_email` also runs that expiry so idle servers reclaim disk without a later upload.
 - Play-instance boot errors include a short sanitized reason (exit code + instance JSON `error`, including truncation actual vs expected byte counts). Raw docker logs are still not returned. A truncated file never starts a container.
+
+### Agent ingest contract
+
+- Default decoded chunk size is 8 KiB (`GB_ROM_UPLOAD_CHUNK_BYTES`). 1 MiB Pokémon dumps: `begin_gb_rom_upload` → `append_gb_rom_upload_batch` → `finalize_gb_rom_upload(..., email, boot=true)`. Never put ~32 KiB of base64 in a single tool argument when the client is an LLM. No host-path ingest. After map/boot, call `ping_pyboy` if think time exceeds ~30 seconds. One live session per email. Play remains screenshot-only; there is no memory or game-state tool.

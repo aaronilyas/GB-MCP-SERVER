@@ -132,8 +132,9 @@ fixture.
   Intermediate ticks use `pyboy.tick(n, render=False)`; LCD is rendered only
   on capture / until-eval frames.
 - **Idle loop no longer ticks.** Uncapped think-time no longer fast-forwards
-  the overworld. Agents must `ping_pyboy` if they will think > ~30s (45-minute
-  idle is the hard close).
+  the overworld. After map/boot, agents must `ping_pyboy` if they will think
+  > ~30s (45-minute idle is the hard close). One live session per email:
+  switching games saves and stops the old instance.
 - **Default hold abort (0.12)** stops a grass hold on a large full-screen
   change (wild battle / map transition). A very subtle fade might not trip
   0.12; callers should still pass `until` for dialogue (`stable` on the bottom
@@ -145,7 +146,12 @@ fixture.
 - This server does not play the game. Reaching Brock in 80–150 turns still
   depends on the agent’s screenshot policy (`interrupt_and_final` / `keyframes`)
   and not using 1-frame taps for walking.
-- **1 MiB commercial dumps cannot use `submit_gb_rom`.** Connector argument
-  limits typically cannot carry ~1.4 MiB of base64. Use
-  `begin_gb_rom_upload` / `append_gb_rom_upload` / `finalize_gb_rom_upload`.
-  Do not ingest from a host filesystem path.
+- **1 MiB Pokémon dumps cannot use `submit_gb_rom`.** Connector argument
+  limits typically cannot carry ~1.4 MiB of base64, and a single ~32 KiB
+  base64 tool argument is truncated when the client is an LLM. Default
+  decoded chunk size is 8 KiB (override with `GB_ROM_UPLOAD_CHUNK_BYTES`).
+  Use `begin_gb_rom_upload` → `append_gb_rom_upload_batch` →
+  `finalize_gb_rom_upload(..., email, boot=true)`. Do not ingest from a
+  host filesystem path.
+- **Screenshot-only play contract is unchanged.** There is no memory or
+  game-state tool.
