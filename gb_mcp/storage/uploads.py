@@ -116,6 +116,27 @@ def _load_live(upload_id: str) -> tuple[Path, dict[str, Any]]:
     return dest, meta
 
 
+def get_upload(upload_id: str) -> dict[str, Any]:
+    """Return safe progress information for a live staged upload.
+
+    Paths, the expected digest, and assembled bytes remain internal.  Calling
+    this also follows the normal expiry path used by append/finalize, so an
+    unknown or expired id has the same ``ValueError`` as those operations.
+    """
+    with _LOCK:
+        expire_uploads()
+        _dest, meta = _load_live(upload_id)
+        return {
+            "upload_id": meta["upload_id"],
+            "filename": meta["filename"],
+            "total_bytes": int(meta["total_bytes"]),
+            "received_bytes": int(meta["received_bytes"]),
+            "next_index": int(meta["next_index"]),
+            "chunk_size": int(meta["chunk_size"]),
+            "expired": False,
+        }
+
+
 def begin_upload(
     *,
     filename: str,
@@ -264,6 +285,20 @@ def append_chunk(
         expire_uploads()
         dest, meta = _load_live(upload_id)
         data = _decode_chunk(chunk_base64, int(meta["chunk_size"]))
+        expected_index = int(meta["next_index"])
+        received_bytes = int(meta["received_bytes"])
+        if chunk_index == expected_index - 1 and len(data) <= received_bytes:
+            data_path = dest / "data.bin"
+            with data_path.open("rb") as fh:
+                fh.seek(-len(data), os.SEEK_END)
+                previous_chunk = fh.read()
+            if previous_chunk == data:
+                return {
+                    "received_bytes": int(meta["received_bytes"]),
+                    "next_index": expected_index,
+                    "total_bytes": int(meta["total_bytes"]),
+                    "upload_id": meta["upload_id"],
+                }
         return _apply_decoded_chunk(
             dest, meta, chunk_index=chunk_index, data=data
         )

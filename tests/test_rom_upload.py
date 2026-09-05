@@ -170,6 +170,78 @@ def test_missing_chunk_rejected(fake_docker, isolated_db, roms_dir: Path) -> Non
     assert _hex_rom_dirs(roms_dir) == []
 
 
+def test_get_upload_status_after_two_appends(
+    isolated_db, roms_dir: Path
+) -> None:
+    rom = make_rom(rom_size_code=0x01)
+    begun = server.begin_gb_rom_upload(
+        "status-game.gb", len(rom), hashlib.sha256(rom).hexdigest()
+    )
+    upload_id = begun["upload_id"]
+    chunk_size = begun["chunk_size"]
+    first, second = rom[:chunk_size], rom[chunk_size : 2 * chunk_size]
+
+    assert server.append_gb_rom_upload(upload_id, 0, _b64(first))["appended"] is True
+    assert server.append_gb_rom_upload(upload_id, 1, _b64(second))["appended"] is True
+
+    status = server.get_gb_rom_upload(upload_id)
+    assert status == {
+        "upload_id": upload_id,
+        "filename": "status-game.gb",
+        "total_bytes": len(rom),
+        "received_bytes": len(first) + len(second),
+        "next_index": 2,
+        "chunk_size": chunk_size,
+        "expired": False,
+    }
+    assert "path" not in status
+    assert "data" not in status
+
+
+def test_last_chunk_replay_is_idempotent_but_different_bytes_fail(
+    isolated_db, roms_dir: Path
+) -> None:
+    rom = make_rom(rom_size_code=0x01)
+    begun = server.begin_gb_rom_upload(
+        "game.gb", len(rom), hashlib.sha256(rom).hexdigest()
+    )
+    upload_id = begun["upload_id"]
+    chunk_size = begun["chunk_size"]
+    first_chunk = rom[:chunk_size]
+    last_chunk = rom[chunk_size : 2 * chunk_size]
+
+    assert server.append_gb_rom_upload(upload_id, 0, _b64(first_chunk))["appended"] is True
+    first = server.append_gb_rom_upload(upload_id, 1, _b64(last_chunk))
+    replay = server.append_gb_rom_upload(upload_id, 1, _b64(last_chunk))
+    different = server.append_gb_rom_upload(upload_id, 1, _b64(b"different"))
+
+    assert first["appended"] is True
+    assert replay == first
+    assert different["appended"] is False
+    assert "chunk_index" in different["error"]
+
+
+def test_get_upload_rejects_unknown_or_expired_ids(
+    isolated_db, roms_dir: Path, monkeypatch
+) -> None:
+    unknown = server.get_gb_rom_upload("0" * 32)
+    assert unknown == {
+        "upload_id": "0" * 32,
+        "error": "unknown or expired upload_id",
+    }
+
+    rom = make_rom()
+    begun = server.begin_gb_rom_upload(
+        "game.gb", len(rom), hashlib.sha256(rom).hexdigest()
+    )
+    monkeypatch.setattr(config, "ROM_UPLOAD_TTL_SECONDS", 0)
+    expired = server.get_gb_rom_upload(begun["upload_id"])
+    assert expired == {
+        "upload_id": begun["upload_id"],
+        "error": "unknown or expired upload_id",
+    }
+
+
 def test_oversize_total_rejected(isolated_db, roms_dir: Path) -> None:
     result = server.begin_gb_rom_upload("game.gb", MAX_ROM_BYTES + 1, "a" * 64)
     assert result["started"] is False

@@ -11,6 +11,7 @@ from rom_builder import make_rom
 _TOOL_NAMES = (
     "submit_gb_rom",
     "begin_gb_rom_upload",
+    "get_gb_rom_upload",
     "append_gb_rom_upload",
     "append_gb_rom_upload_batch",
     "finalize_gb_rom_upload",

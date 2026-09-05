@@ -90,13 +90,17 @@ host filesystem path. Use the chunked ingest:
    (~11 KiB base64). Override with `GB_ROM_UPLOAD_CHUNK_BYTES`. Do **not**
    send 24 KiB single chunks through LLM tool args; hosted connectors
    truncate ~32 KiB base64.
-3. Split the file into consecutive slices of at most `chunk_size` bytes.
+3. If an append times out or its response is truncated, call
+   `get_gb_rom_upload(upload_id)` and resume at its returned `next_index`.
+   The progress response contains no staging paths or ROM bytes. Retrying the
+   immediately previous single chunk with identical bytes is idempotent.
+4. Split the file into consecutive slices of at most `chunk_size` bytes.
    Prefer `append_gb_rom_upload_batch(upload_id, start_index, chunks_base64)`
    with up to 16 slices / 64 KiB decoded per call. Single-slice
    `append_gb_rom_upload(upload_id, i, chunk_base64)` still works. Holes,
    oversized chunks or batches, and `received_bytes > total_bytes` are
    rejected.
-4. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?, subdirectory?)`
+5. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?, subdirectory?)`
    concatenates the staging files under `roms/.uploads/<upload_id>/` (mode
    `0700`), verifies sha256 and length, then runs the **same** isolated
    validator (`container up first`, ROM bytes on stdin `docker exec`,
@@ -105,7 +109,7 @@ host filesystem path. Use the chunked ingest:
    `abort_gb_rom_upload(upload_id)` to drop an in-flight upload without
    persisting. Abandoned uploads expire after 30 minutes; listing a user's
    games also reclaims expired staging.
-5. To replace an unplayable mapping (`list_subdirectories_for_email` shows
+6. To replace an unplayable mapping (`list_subdirectories_for_email` shows
    `playable: false`, for example a 1 KiB Pokémon header), pass the existing
    32-hex id: `finalize_gb_rom_upload(upload_id, email=..., subdirectory=<id>)`.
    That overwrites the `.gb` in that directory in place (same subdirectory
