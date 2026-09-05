@@ -81,6 +81,17 @@ to the volume and remove the container after **45 minutes** without
 `ping_pyboy` if they will think longer than about 30 seconds. Override idle
 with `GB_PYBOY_IDLE_TIMEOUT_SECONDS` (default 2700).
 
+### Overworld walks
+
+- Prefer one-tile steps: hold a direction 16 frames, `gap_frames` 8–16,
+  `screenshot_mode=final`. Do not hold a d-pad for 3600 frames across a door.
+- If the camera scrolls off the map or a stair does nothing: call
+  `reset_pyboy` with `discard_state=true`, then start a new game. Do not keep
+  restoring `.state`.
+- Call `ping_pyboy` if think time is greater than about 30 seconds. The idle
+  loop does not tick (this is correct).
+- `save_battery` does not replace `reset_pyboy`.
+
 ### Agent ingest contract
 
 - Default decoded chunk size is **8 KiB**. `begin_gb_rom_upload` returns
