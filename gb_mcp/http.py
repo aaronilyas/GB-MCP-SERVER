@@ -8,8 +8,11 @@ token from the in-process OAuth authorization server.
 
 from __future__ import annotations
 
+import contextvars
 import secrets
-from typing import Any
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any, Literal
 from urllib.parse import urlparse
 
 import jwt
@@ -43,6 +46,10 @@ _WELL_KNOWN_AS = "/.well-known/oauth-authorization-server"
 _WELL_KNOWN_OIDC = "/.well-known/openid-configuration"
 _JWT_ALGORITHMS = ["HS256"]
 _attached_servers: set[int] = set()
+# Application identity from the current access token. Not transport auth.
+_token_claims: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
+    "gb_mcp_token_claims", default=None
+)
 
 
 def _fallback_origin() -> str:
@@ -161,7 +168,20 @@ def authenticate_bearer(authorization: str | None, request: Request | None = Non
     Accepts the shared ``GB_MCP_BEARER_TOKEN``, an operator HS256 JWT signed
     with ``GB_MCP_JWT_SECRET``, or an access token issued by this process's
     authorization server. OAuth tokens must match this request's issuer and
-    resource (``aud``).
+    resource (``aud``). Email claims are not used here; they are application
+    identity for tools, not transport authentication.
+    """
+    return bearer_token_claims(authorization, request) is not False
+
+
+def bearer_token_claims(
+    authorization: str | None, request: Request | None = None
+) -> dict[str, Any] | None | Literal[False]:
+    """Validate the bearer and return JWT claims when the credential is a JWT.
+
+    ``False`` means unauthenticated. ``None`` means authenticated via the
+    shared static bearer (no OAuth identity). A ``dict`` is the verified JWT
+    payload. Callers must not treat ``email`` / ``sub`` as transport auth.
     """
     if not authorization:
         return False
@@ -171,11 +191,42 @@ def authenticate_bearer(authorization: str | None, request: Request | None = Non
     token = credential.strip()
     shared = config.bearer_token()
     if shared is not None and _constant_time_equals(token, shared):
-        return True
-    return _authenticate_jwt(token, request)
+        return None
+    return _jwt_claims(token, request)
 
 
-def _authenticate_jwt(token: str, request: Request | None) -> bool:
+def current_token_claims() -> dict[str, Any] | None:
+    """JWT claims for the in-flight HTTP request, if any."""
+    return _token_claims.get()
+
+
+def current_oauth_identity() -> str | None:
+    """Application identity from the current access token ``email`` or ``sub``.
+
+    Prefers ``email`` when present. Does not authenticate the request; bearer
+    / OAuth already ran in this module.
+    """
+    claims = _token_claims.get()
+    if not claims:
+        return None
+    for key in ("email", "sub"):
+        value = claims.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+@contextmanager
+def oauth_token_claims(claims: dict[str, Any] | None) -> Iterator[None]:
+    """Bind token claims for this task (tests and HTTP middleware)."""
+    token = _token_claims.set(claims)
+    try:
+        yield
+    finally:
+        _token_claims.reset(token)
+
+
+def _jwt_claims(token: str, request: Request | None) -> dict[str, Any] | Literal[False]:
     operator_secret = config.jwt_secret()
     if operator_secret is not None:
         try:
@@ -189,15 +240,15 @@ def _authenticate_jwt(token: str, request: Request | None) -> bool:
             claims = None
         if isinstance(claims, dict):
             if "iss" in claims or "aud" in claims:
-                return _oauth_jwt_ok(claims, request)
-            return True
+                return claims if _oauth_jwt_ok(claims, request) else False
+            return claims
 
     claims = decode_access_token_claims(token)
     if claims is None:
         return False
     if "iss" in claims or "aud" in claims:
-        return _oauth_jwt_ok(claims, request)
-    return operator_secret is not None
+        return claims if _oauth_jwt_ok(claims, request) else False
+    return claims if operator_secret is not None else False
 
 
 def _oauth_jwt_ok(claims: dict[str, Any], request: Request | None) -> bool:
@@ -299,12 +350,17 @@ class BearerAuthMiddleware:
 
         headers = Headers(scope=scope)
         request = Request(scope, receive)
-        if authenticate_bearer(headers.get("authorization"), request):
-            await self.app(scope, receive, send)
+        claims = bearer_token_claims(headers.get("authorization"), request)
+        if claims is False:
+            response = unauthorized_response(request)
+            await response(scope, receive, send)
             return
 
-        response = unauthorized_response(request)
-        await response(scope, receive, send)
+        token = _token_claims.set(claims if isinstance(claims, dict) else None)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            _token_claims.reset(token)
 
 
 def _cors_middleware() -> Middleware | None:

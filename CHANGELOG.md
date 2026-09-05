@@ -2,6 +2,10 @@
 
 ## [Unreleased] — 2026-09-04
 
+### Session email from OAuth
+
+- Play and mapping tools (`list_subdirectories_for_email`, `load_subdirectory_rom`, `send_pyboy_input`, `ping_pyboy`, `save_battery`, `stop_pyboy`, `submit_gb_rom`, `begin_gb_rom_upload`, `finalize_gb_rom_upload`, `map_subdirectory_to_email`) accept omitted `email` when the current OAuth access token has an `email` or `sub` claim. Explicit `email` still wins. If `email` is omitted and there is no token identity, the result includes a structured `model_request` asking for email (do not invent `trainer@x.ai`). Email is not transport auth; bearer/OAuth stays in `gb_mcp/http.py`.
+
 ### Screenshot-only play loop
 
 - `send_pyboy_input` accepts macros (`hold`, `mash`, `steps`, `buttons`), `until` framebuffer interrupts, wait steps, `gap_frames`, screenshot modes `interrupt_and_final` / `keyframes`, `screenshot_scale` 1–4 (default 4), and uncapped `emulation_speed` (default 0). Caps: 500 steps, `hold_frames` 1–3600. There is no memory or game-state tool; `until` is screenshot-derived on the native 160×144 LCD.

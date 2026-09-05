@@ -49,7 +49,7 @@ from gb_mcp.emulator.play_limits import (
     MIN_UNTIL_EVAL_INTERVAL,
 )
 from gb_mcp.gb.header import assert_rom_playable
-from gb_mcp.http import attach_public_routes, run_http
+from gb_mcp.http import attach_public_routes, current_oauth_identity, run_http
 from gb_mcp.isolation.docker import (
     _create_isolated_container,
     _destroy_container,
@@ -95,7 +95,8 @@ mcp = MCPServer(
         "user's mapped ROM subdirectories and game metadata (including playable) "
         "with list_subdirectories_for_email. "
         "Load a mapped subdirectory's ROM into PyBoy with load_subdirectory_rom "
-        "(email and subdirectory name are both required; default speed is uncapped; "
+        "(subdirectory is required; email may be omitted when the OAuth access "
+        "token has an email or sub claim; default speed is uncapped; "
         "unplayable/truncated files are rejected before a play instance starts). "
         "Play with send_pyboy_input (buttons, steps, macros, optional until on the "
         "framebuffer); it returns PNG screenshot(s). There is no memory or "
@@ -109,6 +110,16 @@ mcp = MCPServer(
         "session status for an email. A full how-to is at the gb://usage "
         "resource; reading it is optional."
     ),
+)
+
+
+_EMAIL_ARG_DESCRIPTION = (
+    "Email of the LLM user (application identity, not transport auth). "
+    "Optional when the current OAuth access token has an email or sub claim; "
+    "that identity is used if this argument is omitted. An explicit email "
+    "wins over token claims. If omitted and there is no token identity, the "
+    "result includes model_request asking for email. Ask the user if you do "
+    "not already have it. Do not invent an email."
 )
 
 
@@ -126,6 +137,49 @@ def _optional_subdirectory(subdirectory: str | None) -> str | None:
     return value or None
 
 
+def _token_identity_email() -> str | None:
+    """Canonical email from the current OAuth access token email/sub claim."""
+    raw = current_oauth_identity()
+    if raw is None:
+        return None
+    try:
+        return db.normalize_email(raw)
+    except ValueError:
+        return None
+
+
+def _bind_session_email(email: str | None) -> str | None:
+    """Explicit email wins; otherwise bind from OAuth email/sub claims."""
+    provided = _optional_email(email)
+    if provided is not None:
+        return provided
+    return _token_identity_email()
+
+
+def _missing_email_result(
+    subdirectory: str | None = None, **extra: Any
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "model_request": _email_model_request(subdirectory),
+    }
+    if subdirectory is not None:
+        result["subdirectory"] = subdirectory
+    result.update(extra)
+    return result
+
+
+def _require_session_email(
+    email: str | None,
+    *,
+    subdirectory: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> str | dict[str, Any]:
+    bound = _bind_session_email(email)
+    if bound is not None:
+        return bound
+    return _missing_email_result(subdirectory, **(extra or {}))
+
+
 def _unplayable_boot_error(reason: str, subdirectory: str) -> str:
     """Surface truncation with the replace-in-place ingest path."""
     text = reason.strip()
@@ -141,14 +195,23 @@ def _unplayable_boot_error(reason: str, subdirectory: str) -> str:
     )
 
 
-def _email_model_request(subdirectory: str) -> dict[str, str]:
-    return {
-        "name": "email",
-        "instruction": (
+def _email_model_request(subdirectory: str | None = None) -> dict[str, str]:
+    if subdirectory:
+        instruction = (
             "Provide the email address of the user of the LLM so subdirectory "
             f"{subdirectory} can be mapped to that user. Call "
-            "map_subdirectory_to_email with the subdirectory name and email."
-        ),
+            "map_subdirectory_to_email with the subdirectory name and email. "
+            "Ask the user for this if you do not already have it. Do not invent "
+            "an email."
+        )
+    else:
+        instruction = (
+            "Provide the email address of the user of the LLM. Ask the user for "
+            "this if you do not already have it. Do not invent an email."
+        )
+    return {
+        "name": "email",
+        "instruction": instruction,
     }
 
 
@@ -216,6 +279,24 @@ def _owned_subdirectory(email: str, subdirectory: str) -> tuple[str, str] | dict
             "error": f"subdirectory {name!r} does not exist under roms/",
         }
     return normalized_email, name
+
+
+def _resolve_owned_session(
+    email: str | None,
+    subdirectory: str,
+    **extra: Any,
+) -> tuple[str, str] | dict[str, Any]:
+    """Bind session email, then confirm the owned mapping."""
+    bound = _require_session_email(
+        email, subdirectory=subdirectory or None, extra=extra
+    )
+    if isinstance(bound, dict):
+        return bound
+    resolved = _owned_subdirectory(bound, subdirectory)
+    if isinstance(resolved, dict):
+        resolved.update(extra)
+        return resolved
+    return resolved
 
 
 def _call_manager_method(method: Any, *args: Any, **kwargs: Any) -> Any:
@@ -294,6 +375,7 @@ def _persist_map_boot(
     safe_name = _sanitize_filename(filename)
     replace_owned: tuple[str, str] | None = None
     chosen_sub = _optional_subdirectory(subdirectory)
+    email = _bind_session_email(email)
     if chosen_sub is not None:
         provided_email = _optional_email(email)
         if provided_email is None:
@@ -305,6 +387,7 @@ def _persist_map_boot(
                 "mapped": False,
                 "validation": validation,
                 "error": "email is required to replace an existing subdirectory",
+                "model_request": _email_model_request(chosen_sub),
             }
         owned = _subdirectory_owned_by_email(provided_email, chosen_sub)
         if isinstance(owned, dict):
@@ -408,9 +491,10 @@ def _persist_map_boot(
         "rom_base64. Use batch append; do not send 24 KiB single chunks through "
         "LLM tool args. Optional subdirectory (32-hex) plus email replaces the "
         ".gb/.gbc in that owned mapping in place (same id); omitted "
-        "subdirectory allocates a new name. Unmapped, other-owned, or invalid "
-        "hex names are rejected and nothing is persisted. Pass boot=true to "
-        "start PyBoy after a successful map."
+        "subdirectory allocates a new name. Email may be omitted when the "
+        "OAuth access token has an email or sub claim. Unmapped, other-owned, "
+        "or invalid hex names are rejected and nothing is persisted. Pass "
+        "boot=true to start PyBoy after a successful map."
     ),
 )
 def submit_gb_rom(
@@ -420,14 +504,7 @@ def submit_gb_rom(
         str | None,
         Field(
             default=None,
-            description=(
-                "Optional. Email address of the user of the LLM if you already "
-                "have it. After a ROM passes Game Boy validation the server "
-                "returns a 32-character subdirectory name; if this is omitted "
-                "it also requests the address so you can call "
-                "map_subdirectory_to_email. Required when replacing an owned "
-                "mapping via subdirectory."
-            ),
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
     ] = None,
     boot: Annotated[
@@ -437,9 +514,10 @@ def submit_gb_rom(
             description=(
                 "If true and the ROM is mapped to email, start PyBoy for that "
                 "subdirectory after submit (same as load_subdirectory_rom: "
-                "uncapped speed, 45-minute idle). If email is missing or "
-                "mapping failed, the ROM is still saved but PyBoy is not "
-                "started; follow model_request to map first."
+                "uncapped speed, 45-minute idle). If email is missing (and the "
+                "OAuth token has no email/sub claim) or mapping failed, the "
+                "ROM is still saved but PyBoy is not started; follow "
+                "model_request to map first."
             ),
         ),
     ] = False,
@@ -451,8 +529,9 @@ def submit_gb_rom(
                 "Optional. 32-hex subdirectory already mapped to email. When "
                 "set, atomically overwrite the .gb/.gbc in that directory "
                 "(same subdirectory id) instead of allocating a new name. "
-                "email is required. Unmapped, other-owned, or invalid hex "
-                "names are rejected and nothing is persisted."
+                "email is required unless the OAuth access token has an email "
+                "or sub claim. Unmapped, other-owned, or invalid hex names are "
+                "rejected and nothing is persisted."
             ),
         ),
     ] = None,
@@ -463,8 +542,9 @@ def submit_gb_rom(
         rom_base64: Base64-encoded contents of the candidate .gb/.gbc file.
         filename: Preferred filename to use if the ROM is accepted (sanitized).
         email: Optional email of the LLM's user. Used to map the subdirectory
-            only after the ROM is confirmed valid; omitted emails are requested
-            in the tool result. Required with subdirectory to replace in place.
+            only after the ROM is confirmed valid; omitted emails bind from
+            OAuth email/sub claims or are requested in model_request. Required
+            with subdirectory to replace in place unless a token identity exists.
         boot: If true, start PyBoy after a successful email mapping.
         subdirectory: Optional owned 32-hex mapping to overwrite in place.
 
@@ -555,10 +635,7 @@ def begin_gb_rom_upload(
         str | None,
         Field(
             default=None,
-            description=(
-                "Optional. Email of the LLM user. Stored on the upload and used "
-                "by finalize_gb_rom_upload if that call omits email."
-            ),
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
     ] = None,
 ) -> dict[str, Any]:
@@ -568,7 +645,7 @@ def begin_gb_rom_upload(
             filename=filename,
             total_bytes=total_bytes,
             sha256=sha256,
-            email=_optional_email(email),
+            email=_bind_session_email(email),
         )
     except Exception as exc:  # noqa: BLE001
         return {
@@ -708,7 +785,8 @@ def append_gb_rom_upload_batch(
         "boot PyBoy. Optional subdirectory (32-hex) plus email atomically "
         "overwrites the .gb/.gbc in that owned mapping (same subdirectory id) "
         "instead of allocating a new name — use this to replace an unplayable "
-        "truncated dump. Unmapped, other-owned, or invalid hex names are "
+        "truncated dump. Email may be omitted when the OAuth access token has "
+        "an email or sub claim. Unmapped, other-owned, or invalid hex names are "
         "rejected and nothing is persisted. If subdirectory is omitted, a new "
         "32-hex directory is allocated. Staging files are always deleted. "
         "Same result shape as submit_gb_rom."
@@ -727,11 +805,7 @@ def finalize_gb_rom_upload(
         str | None,
         Field(
             default=None,
-            description=(
-                "Optional. Email of the LLM user. Overrides the email stored at "
-                "begin_gb_rom_upload if both are provided. Required when "
-                "replacing an owned mapping via subdirectory."
-            ),
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
     ] = None,
     boot: Annotated[
@@ -752,7 +826,8 @@ def finalize_gb_rom_upload(
                 "Optional. 32-hex subdirectory already mapped to email. When "
                 "set, atomically overwrite the .gb/.gbc in that directory "
                 "(same subdirectory id) instead of allocating a new name. "
-                "email is required (this call or begin_gb_rom_upload). "
+                "email is required (this call, begin_gb_rom_upload, or an "
+                "OAuth email/sub claim) unless omitted with a token identity. "
                 "Unmapped, other-owned, or invalid hex names are rejected "
                 "and nothing is persisted."
             ),
@@ -799,6 +874,8 @@ def finalize_gb_rom_upload(
         if chosen_email is None:
             stored = meta.get("email")
             chosen_email = stored if isinstance(stored, str) else None
+        if chosen_email is None:
+            chosen_email = _token_identity_email()
         return _persist_map_boot(
             rom_bytes=assembled,
             filename=str(chosen_name or "rom.gb"),
@@ -842,7 +919,8 @@ def abort_gb_rom_upload(upload_id: str) -> dict[str, Any]:
         "Map a 32-character ROM subdirectory name (returned by submit_gb_rom "
         "after a ROM passes Game Boy validation) to the email address of the "
         "user of the LLM. Call this after submit_gb_rom returns a subdirectory "
-        "and a request for the user's email."
+        "and a request for the user's email. Email may be omitted when the "
+        "OAuth access token has an email or sub claim; do not invent an email."
     ),
 )
 def map_subdirectory_to_email(
@@ -856,14 +934,12 @@ def map_subdirectory_to_email(
         ),
     ],
     email: Annotated[
-        str,
+        str | None,
         Field(
-            description=(
-                "Email address of the user of the LLM. Ask the user for this "
-                "if you do not already have it."
-            )
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
-    ],
+    ] = None,
 ) -> dict[str, Any]:
     """Persist the mapping between a ROM subdirectory and the user's email."""
     try:
@@ -874,6 +950,9 @@ def map_subdirectory_to_email(
             "subdirectory": subdirectory,
             "error": str(exc),
         }
+    bound = _require_session_email(email, subdirectory=name, extra={"mapped": False})
+    if isinstance(bound, dict):
+        return bound
     if not (config.ROMS_DIR / name).is_dir():
         return {
             "mapped": False,
@@ -883,7 +962,7 @@ def map_subdirectory_to_email(
 
     try:
         with db.session_scope() as session:
-            mapped = db.map_subdirectory_to_email(session, name, email)
+            mapped = db.map_subdirectory_to_email(session, name, bound)
             normalized_email = mapped.user.email
     except Exception as exc:  # noqa: BLE001
         return {
@@ -909,23 +988,27 @@ def map_subdirectory_to_email(
         "file names and sizes, and playable). playable is false when the "
         "stored file is shorter than the cartridge header size code (a "
         "truncated dump cannot be booted). Call this when you need to find an "
-        "existing game directory for that user. Ask the user for their email "
-        "if you do not already have it."
+        "existing game directory for that user. Email may be omitted when the "
+        "OAuth access token has an email or sub claim. Ask the user for their "
+        "email if you do not already have it. Do not invent an email."
     ),
 )
 def list_subdirectories_for_email(
     email: Annotated[
-        str,
+        str | None,
         Field(
-            description=(
-                "Email address of the user of the LLM who owns the ROM "
-                "subdirectories. Ask the user for this if you do not already "
-                "have it."
-            )
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
-    ],
+    ] = None,
 ) -> dict[str, Any]:
     """Return mapped roms/ subdirectories and identifying game metadata for an email."""
+    bound = _require_session_email(
+        email, extra={"count": 0, "subdirectories": []}
+    )
+    if isinstance(bound, dict):
+        return bound
+    email = bound
     try:
         expire_uploads()
     except Exception:  # noqa: BLE001 — listing must not fail if staging cleanup fails
@@ -957,8 +1040,9 @@ def list_subdirectories_for_email(
     name="load_subdirectory_rom",
     description=(
         "Load a mapped ROM subdirectory and start a persistent PyBoy session "
-        "for that game. Both the LLM user's email and the 32-character "
-        "subdirectory name are required. A truncated or otherwise unplayable "
+        "for that game. The 32-character subdirectory name is required. Email "
+        "may be omitted when the OAuth access token has an email or sub claim. "
+        "A truncated or otherwise unplayable "
         "file is rejected before any play instance starts (started=false); "
         "re-upload the complete dump with finalize_gb_rom_upload and the "
         "same subdirectory id. Default emulation_speed is 0 (uncapped). The "
@@ -971,15 +1055,12 @@ def list_subdirectories_for_email(
 )
 def load_subdirectory_rom(
     email: Annotated[
-        str,
+        str | None,
         Field(
-            description=(
-                "Email address of the user of the LLM who owns the ROM "
-                "subdirectory. Ask the user for this if you do not already "
-                "have it."
-            )
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
-    ],
+    ] = None,
     subdirectory: Annotated[
         str,
         Field(
@@ -988,7 +1069,7 @@ def load_subdirectory_rom(
                 "and mapped with map_subdirectory_to_email."
             )
         ),
-    ],
+    ] = "",
     emulation_speed: Annotated[
         int | str,
         Field(
@@ -1012,7 +1093,9 @@ def load_subdirectory_rom(
     ] = DEFAULT_IDLE_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Start (or resume) a PyBoy session for an owned ROM subdirectory."""
-    resolved = _owned_subdirectory(email, subdirectory)
+    resolved = _resolve_owned_session(
+        email, subdirectory, started=False, running=False
+    )
     if isinstance(resolved, dict):
         resolved["started"] = False
         resolved["running"] = False
@@ -1189,8 +1272,9 @@ def _play_request_dict(
     name="send_pyboy_input",
     description=(
         "Send Game Boy button input to a running PyBoy session and return PNG "
-        "screenshot(s) of the resulting screen. Both the LLM user's email and "
-        "the 32-character subdirectory name are required. One mode per call: a "
+        "screenshot(s) of the resulting screen. The 32-character subdirectory "
+        "name is required. Email may be omitted when the OAuth access token "
+        "has an email or sub claim. One mode per call: a "
         "single chord (`buttons` + optional `hold_frames`), an ordered `steps` "
         "list, top-level `wait=true`, or `macro` hold|mash|steps|buttons. Do "
         "not pass a non-empty top-level buttons list together with any `steps` "
@@ -1217,15 +1301,12 @@ def _play_request_dict(
 )
 def send_pyboy_input(
     email: Annotated[
-        str,
+        str | None,
         Field(
-            description=(
-                "Email address of the user of the LLM who owns the running "
-                "PyBoy session. Ask the user for this if you do not already "
-                "have it."
-            )
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
-    ],
+    ] = None,
     subdirectory: Annotated[
         str,
         Field(
@@ -1233,7 +1314,7 @@ def send_pyboy_input(
                 "The 32-character subdirectory name of the running PyBoy session."
             )
         ),
-    ],
+    ] = "",
     buttons: Annotated[
         list[str] | None,
         Field(
@@ -1448,9 +1529,8 @@ def send_pyboy_input(
     ] = False,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
     """Press buttons on a running PyBoy session, capture the screen, reset idle."""
-    resolved = _owned_subdirectory(email, subdirectory)
+    resolved = _resolve_owned_session(email, subdirectory, sent=False)
     if isinstance(resolved, dict):
-        resolved["sent"] = False
         return resolved
 
     normalized_email, name = resolved
@@ -1507,8 +1587,9 @@ def send_pyboy_input(
     name="ping_pyboy",
     description=(
         "Reset the idle timer on a running PyBoy session without advancing "
-        "emulation and without pressing buttons. Both the LLM user's email "
-        "and the 32-character subdirectory name are required. Call this if "
+        "emulation and without pressing buttons. The 32-character subdirectory "
+        "name is required. Email may be omitted when the OAuth access token "
+        "has an email or sub claim. Call this if "
         "you will think longer than about 30 seconds; otherwise the session "
         "auto-saves and closes after 45 minutes with no send_pyboy_input or "
         "ping_pyboy. Returns alive, idle_timeout_seconds, and "
@@ -1517,15 +1598,12 @@ def send_pyboy_input(
 )
 def ping_pyboy(
     email: Annotated[
-        str,
+        str | None,
         Field(
-            description=(
-                "Email address of the user of the LLM who owns the running "
-                "PyBoy session. Ask the user for this if you do not already "
-                "have it."
-            )
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
-    ],
+    ] = None,
     subdirectory: Annotated[
         str,
         Field(
@@ -1533,12 +1611,11 @@ def ping_pyboy(
                 "The 32-character subdirectory name of the running PyBoy session."
             )
         ),
-    ],
+    ] = "",
 ) -> dict[str, Any]:
     """Keep a PyBoy session alive without ticking or pressing buttons."""
-    resolved = _owned_subdirectory(email, subdirectory)
+    resolved = _resolve_owned_session(email, subdirectory, alive=False)
     if isinstance(resolved, dict):
-        resolved["alive"] = False
         return resolved
 
     normalized_email, name = resolved
@@ -1557,22 +1634,20 @@ def ping_pyboy(
     name="save_battery",
     description=(
         "Write the cartridge battery/save for a running PyBoy session without "
-        "stopping PyBoy. Both the LLM user's email and the 32-character "
-        "subdirectory name are required. Returns saved: true. stop_pyboy still "
+        "stopping PyBoy. The 32-character subdirectory name is required. Email "
+        "may be omitted when the OAuth access token has an email or sub claim. "
+        "Returns saved: true. stop_pyboy still "
         "saves then stops. Idle timeout also saves then closes."
     ),
 )
 def save_battery(
     email: Annotated[
-        str,
+        str | None,
         Field(
-            description=(
-                "Email address of the user of the LLM who owns the running "
-                "PyBoy session. Ask the user for this if you do not already "
-                "have it."
-            )
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
-    ],
+    ] = None,
     subdirectory: Annotated[
         str,
         Field(
@@ -1580,12 +1655,11 @@ def save_battery(
                 "The 32-character subdirectory name of the running PyBoy session."
             )
         ),
-    ],
+    ] = "",
 ) -> dict[str, Any]:
     """Write cartridge save state and leave PyBoy running."""
-    resolved = _owned_subdirectory(email, subdirectory)
+    resolved = _resolve_owned_session(email, subdirectory, saved=False)
     if isinstance(resolved, dict):
-        resolved["saved"] = False
         return resolved
 
     normalized_email, name = resolved
@@ -1603,8 +1677,9 @@ def save_battery(
 @mcp.tool(
     name="stop_pyboy",
     description=(
-        "Stop a running PyBoy session. Both the LLM user's email and the "
-        "32-character subdirectory name are required. The game is saved "
+        "Stop a running PyBoy session. The 32-character subdirectory name is "
+        "required. Email may be omitted when the OAuth access token has an "
+        "email or sub claim. The game is saved "
         "before PyBoy closes. Use save_battery to write the save without "
         "stopping. Use this instead of waiting for the 45-minute idle "
         "auto-save."
@@ -1612,15 +1687,12 @@ def save_battery(
 )
 def stop_pyboy(
     email: Annotated[
-        str,
+        str | None,
         Field(
-            description=(
-                "Email address of the user of the LLM who owns the running "
-                "PyBoy session. Ask the user for this if you do not already "
-                "have it."
-            )
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
         ),
-    ],
+    ] = None,
     subdirectory: Annotated[
         str,
         Field(
@@ -1628,12 +1700,11 @@ def stop_pyboy(
                 "The 32-character subdirectory name of the PyBoy session to stop."
             )
         ),
-    ],
+    ] = "",
 ) -> dict[str, Any]:
     """Save and close a running PyBoy session."""
-    resolved = _owned_subdirectory(email, subdirectory)
+    resolved = _resolve_owned_session(email, subdirectory, stopped=False)
     if isinstance(resolved, dict):
-        resolved["stopped"] = False
         return resolved
 
     normalized_email, name = resolved
@@ -1656,9 +1727,14 @@ works even if you never read `gb://usage`. This resource contains no user data.
 Email is application identity, not transport authentication. Never put a
 bearer token, signed token, login secret, API key, or Docker credential in a
 tool argument. Never guess, enumerate, or probe other users' emails or
-subdirectory names. Only submit a ROM the human provided; do not scrape the
-host filesystem or send unrelated files. Subdirectory names are the
-32-character hex strings returned by `submit_gb_rom`, not game titles.
+subdirectory names. Do not invent an email (for example `trainer@x.ai`).
+If the current OAuth access token has an `email` or `sub` claim, you may omit
+`email` on play and mapping tools; that identity is used. An explicit `email`
+wins when present. If `email` is omitted and there is no token identity, the
+tool result includes `model_request` asking for email — ask the human. Only
+submit a ROM the human provided; do not scrape the host filesystem or send
+unrelated files. Subdirectory names are the 32-character hex strings returned
+by `submit_gb_rom`, not game titles.
 
 There is no memory, WRAM, HRAM, map-id, party, or game-state tool. Play
 feedback is PNG screenshots plus screenshot-derived framebuffer signals
@@ -1676,11 +1752,12 @@ Provide the ROM as base64 (`rom_base64`). `filename` and `email` are optional.
 Validation runs in an isolated Docker container. On success the result includes
 a 32-character hexadecimal `subdirectory` name. Play is per-subdirectory.
 
-If `email` was omitted or mapping failed, follow `model_request` in the result
-and call `map_subdirectory_to_email`. Do not invent an email. If `email` is
-present the subdirectory is mapped automatically. `boot=true` starts PyBoy
-after a successful map (uncapped speed, 45-minute idle); if not mapped, PyBoy
-is not started.
+If `email` was omitted, an OAuth `email` or `sub` claim is used when present.
+If mapping failed or there is no token identity, follow `model_request` in
+the result and call `map_subdirectory_to_email`. Do not invent an email. If
+`email` is present (or bound from the token) the subdirectory is mapped
+automatically. `boot=true` starts PyBoy after a successful map (uncapped
+speed, 45-minute idle); if not mapped, PyBoy is not started.
 
 `submit_gb_rom` is for small homebrew that fits in one argument. A truncated
 dump (file shorter than cartridge header 0x0148) is rejected. For 1 MiB dumps,
@@ -1720,8 +1797,9 @@ reclaims expired staging.
 
 ### 2. map_subdirectory_to_email
 
-Bind that 32-character hex name to the LLM user's email. Ask the human for
-their email if you do not already have it. Never invent an email.
+Bind that 32-character hex name to the LLM user's email. `email` may be
+omitted when the OAuth access token has an email or sub claim. Ask the human
+for their email if you do not already have it. Never invent an email.
 
 ### 3. list_subdirectories_for_email
 
@@ -1729,12 +1807,14 @@ Find that user's games. Results include cartridge header title, platform,
 `playable`, and other identifying metadata. If `playable` is false, do not
 load that id and do not read a sandbox attachment path into `rom_base64`.
 Re-upload the complete dump with `finalize_gb_rom_upload(..., subdirectory=<id>,
-email=...)`, then `load_subdirectory_rom` with the same id. Ask the human for
-their email if you do not already have it.
+email=...)`, then `load_subdirectory_rom` with the same id. `email` may be
+omitted when the OAuth access token has an email or sub claim; otherwise ask
+the human. Never invent an email.
 
 ### 4. load_subdirectory_rom
 
-`email` and `subdirectory` are both required. Starts or resumes the play
+`subdirectory` is required. `email` may be omitted when the OAuth access
+token has an email or sub claim. Starts or resumes the play
 instance for that owned subdirectory. A truncated or otherwise unplayable
 file is rejected before a play instance starts; replace it first with
 `finalize_gb_rom_upload(..., subdirectory=<id>, email=...)`. Default
@@ -1745,7 +1825,8 @@ same subdirectory restores that save.
 
 ### 5. send_pyboy_input
 
-`email` and `subdirectory` are both required. Send button chords / macros and
+`subdirectory` is required. `email` may be omitted when the OAuth access
+token has an email or sub claim. Send button chords / macros and
 receive PNG screenshot(s). One mode per call: `buttons` (optional
 `hold_frames`), an ordered `steps` list, top-level `wait=true`, or `macro`
 hold|mash|steps|buttons — not a non-empty `buttons` list together with a
@@ -1763,20 +1844,23 @@ A successful call resets the 45-minute idle timer.
 
 ### 6. ping_pyboy
 
-`email` and `subdirectory` are both required. Resets the idle timer. Does not
+`subdirectory` is required. `email` may be omitted when the OAuth access
+token has an email or sub claim. Resets the idle timer. Does not
 advance emulation and does not press buttons. Call this if you will think
 longer than about 30 seconds. Returns `alive`, `idle_timeout_seconds`,
 `seconds_since_last_input`.
 
 ### 7. save_battery
 
-`email` and `subdirectory` are both required. Writes the cartridge
+`subdirectory` is required. `email` may be omitted when the OAuth access
+token has an email or sub claim. Writes the cartridge
 battery/save and leaves PyBoy running. Returns `saved: true`. `stop_pyboy`
 still saves then stops.
 
 ### 8. stop_pyboy
 
-`email` and `subdirectory` are both required. Saves, then stops the play
+`subdirectory` is required. `email` may be omitted when the OAuth access
+token has an email or sub claim. Saves, then stops the play
 instance. After about 45 minutes with no `send_pyboy_input` or `ping_pyboy`
 the session also auto-saves and closes.
 

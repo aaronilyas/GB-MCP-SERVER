@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 import secrets
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -12,10 +14,12 @@ import jwt
 import pytest
 from starlette.testclient import TestClient
 
-from gb_mcp.http import create_http_app
+import db
+from gb_mcp.http import create_http_app, current_oauth_identity, oauth_token_claims
 from test_http import PROTOCOL_VERSION, TOKEN, _initialize, _jsonrpc_from_response, _mcp_headers
 
 import server
+from rom_builder import make_rom
 
 JWT_SECRET = "jwt-test-secret-32-bytes-minimum!"
 PUBLIC_ORIGIN = "https://gb.example"
@@ -455,3 +459,209 @@ def test_authorize_rejects_unregistered_redirect_host(oauth_client: TestClient) 
     assert response.status_code == 400
     assert response.json()["error"] == "invalid_request"
     assert "evil" in response.json()["error_description"]
+
+
+def _identity_access_token(*, email: str | None = None, sub: str = "gb-mcp-user") -> str:
+    now = int(time.time())
+    payload: dict[str, Any] = {
+        "iss": PUBLIC_ORIGIN,
+        "aud": PUBLIC_RESOURCE,
+        "exp": now + 3600,
+        "iat": now,
+        "nbf": now,
+        "sub": sub,
+        "scope": "mcp",
+        "client_id": "test-client",
+    }
+    if email is not None:
+        payload["email"] = email
+    return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
+
+
+def _call_tool(
+    client: TestClient,
+    *,
+    token: str,
+    session_id: str,
+    name: str,
+    arguments: dict[str, Any],
+) -> dict[str, Any]:
+    response = client.post(
+        "/mcp",
+        headers=_mcp_headers(token=token, session_id=session_id),
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+    )
+    assert response.status_code == 200, response.text
+    message = _jsonrpc_from_response(response)
+    assert message is not None
+    assert "error" not in message, message
+    content = message["result"]["content"]
+    text = "".join(part.get("text", "") for part in content if part.get("type") == "text")
+    return json.loads(text)
+
+
+def test_oauth_identity_prefers_email_claim_over_sub() -> None:
+    with oauth_token_claims({"email": "from-email@example.com", "sub": "from-sub@example.com"}):
+        assert current_oauth_identity() == "from-email@example.com"
+    with oauth_token_claims({"sub": "from-sub@example.com"}):
+        assert current_oauth_identity() == "from-sub@example.com"
+    with oauth_token_claims(None):
+        assert current_oauth_identity() is None
+
+
+def test_oauth_token_email_claim_binds_omitted_tool_email(
+    oauth_client: TestClient, isolated_db, roms_dir: Path
+) -> None:
+    name = "c" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / name
+    dest.mkdir()
+    (dest / "tetris.gb").write_bytes(make_rom(title=b"TETRIS"))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "oauth-user@example.com")
+
+    token = _identity_access_token(email="oauth-user@example.com")
+    session_id = _initialize(oauth_client, token=token)
+    payload = _call_tool(
+        oauth_client,
+        token=token,
+        session_id=session_id,
+        name="list_subdirectories_for_email",
+        arguments={},
+    )
+    assert payload["email"] == "oauth-user@example.com"
+    assert payload["count"] == 1
+    assert payload["subdirectories"][0]["subdirectory"] == name
+    assert "model_request" not in payload
+
+
+def test_oauth_token_sub_claim_binds_omitted_tool_email(
+    oauth_client: TestClient, isolated_db, roms_dir: Path
+) -> None:
+    name = "d" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / name
+    dest.mkdir()
+    (dest / "tetris.gb").write_bytes(make_rom(title=b"TETRIS"))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "sub-user@example.com")
+
+    token = _identity_access_token(sub="sub-user@example.com")
+    session_id = _initialize(oauth_client, token=token)
+    payload = _call_tool(
+        oauth_client,
+        token=token,
+        session_id=session_id,
+        name="list_subdirectories_for_email",
+        arguments={},
+    )
+    assert payload["email"] == "sub-user@example.com"
+    assert payload["count"] == 1
+
+
+def test_explicit_email_overrides_oauth_token_claims(
+    oauth_client: TestClient, isolated_db, roms_dir: Path
+) -> None:
+    owner_name = "e" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / owner_name
+    dest.mkdir()
+    (dest / "tetris.gb").write_bytes(make_rom(title=b"TETRIS"))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, owner_name, "owner@example.com")
+
+    token = _identity_access_token(email="token@example.com")
+    session_id = _initialize(oauth_client, token=token)
+    listed_token = _call_tool(
+        oauth_client,
+        token=token,
+        session_id=session_id,
+        name="list_subdirectories_for_email",
+        arguments={},
+    )
+    listed_explicit = _call_tool(
+        oauth_client,
+        token=token,
+        session_id=session_id,
+        name="list_subdirectories_for_email",
+        arguments={"email": "owner@example.com"},
+    )
+    assert listed_token["email"] == "token@example.com"
+    assert listed_token["count"] == 0
+    assert listed_explicit["email"] == "owner@example.com"
+    assert listed_explicit["count"] == 1
+    assert listed_explicit["subdirectories"][0]["subdirectory"] == owner_name
+
+
+def test_static_bearer_omitted_email_returns_model_request(
+    oauth_client: TestClient, isolated_db
+) -> None:
+    session_id = _initialize(oauth_client, token=TOKEN)
+    payload = _call_tool(
+        oauth_client,
+        token=TOKEN,
+        session_id=session_id,
+        name="list_subdirectories_for_email",
+        arguments={},
+    )
+    assert payload["count"] == 0
+    assert payload["model_request"]["name"] == "email"
+    assert "email" in payload["model_request"]["instruction"].lower()
+
+
+def test_pkce_token_without_email_claim_asks_for_email(
+    oauth_client: TestClient, isolated_db
+) -> None:
+    redirect_uri = "http://127.0.0.1:9999/callback"
+    registered = _register(oauth_client, redirect_uri)
+    verifier, challenge = _pkce()
+    code = _authorize_and_allow(
+        oauth_client,
+        client_id=registered["client_id"],
+        redirect_uri=redirect_uri,
+        challenge=challenge,
+    )
+    tokens = _token(
+        oauth_client,
+        client_id=registered["client_id"],
+        code=code,
+        redirect_uri=redirect_uri,
+        verifier=verifier,
+    )
+    claims = jwt.decode(
+        tokens["access_token"],
+        JWT_SECRET,
+        algorithms=["HS256"],
+        audience=PUBLIC_RESOURCE,
+    )
+    assert claims["sub"]
+    assert "email" not in claims
+    session_id = _initialize(oauth_client, token=tokens["access_token"])
+    payload = _call_tool(
+        oauth_client,
+        token=tokens["access_token"],
+        session_id=session_id,
+        name="list_subdirectories_for_email",
+        arguments={},
+    )
+    assert payload["model_request"]["name"] == "email"
+
+
+def test_omitted_email_does_not_bypass_bearer_auth(oauth_client: TestClient) -> None:
+    response = oauth_client.post(
+        "/mcp",
+        headers=_mcp_headers(token=None),
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "list_subdirectories_for_email",
+                "arguments": {},
+            },
+        },
+    )
+    assert response.status_code == 401
+    assert response.json()["error"] == "invalid_token"

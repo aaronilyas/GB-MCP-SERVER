@@ -12,6 +12,7 @@ import server
 from gb_mcp import config
 from gb_mcp.emulator import session as pyboy_sessions
 from gb_mcp.emulator.session import MAX_HOLD_FRAMES, MAX_INPUT_STEPS
+from gb_mcp.http import oauth_token_claims
 
 from rom_builder import make_rom
 
@@ -682,6 +683,124 @@ def test_send_pyboy_input_hold_and_scale(isolated_db, roms_dir: Path, pyboy_mana
     joined = " ".join(_flatten_status_keys(status)).lower()
     for needle in FORBIDDEN_RESPONSE_KEY_NEEDLES:
         assert needle not in joined
+
+
+def test_list_omitted_email_without_token_identity_returns_model_request() -> None:
+    result = server.list_subdirectories_for_email()
+    assert result["count"] == 0
+    assert result["subdirectories"] == []
+    assert "model_request" in result
+    assert result["model_request"]["name"] == "email"
+    assert "invent" in result["model_request"]["instruction"].lower() or "ask the user" in result[
+        "model_request"
+    ]["instruction"].lower()
+
+
+def test_list_binds_email_from_oauth_email_claim(isolated_db, roms_dir: Path) -> None:
+    name = _mapped_rom(roms_dir, email="owner@example.com")
+    with oauth_token_claims({"email": "Owner@Example.com", "sub": "other@example.com"}):
+        result = server.list_subdirectories_for_email()
+    assert result["email"] == "owner@example.com"
+    assert result["count"] == 1
+    assert result["subdirectories"][0]["subdirectory"] == name
+    assert "model_request" not in result
+
+
+def test_list_binds_email_from_oauth_sub_claim(isolated_db, roms_dir: Path) -> None:
+    name = _mapped_rom(roms_dir, email="sub-user@example.com")
+    with oauth_token_claims({"sub": "Sub-User@example.com"}):
+        result = server.list_subdirectories_for_email()
+    assert result["email"] == "sub-user@example.com"
+    assert result["count"] == 1
+    assert result["subdirectories"][0]["subdirectory"] == name
+
+
+def test_list_explicit_email_overrides_oauth_claims(isolated_db, roms_dir: Path) -> None:
+    name = _mapped_rom(roms_dir, email="owner@example.com")
+    with oauth_token_claims({"email": "token@example.com"}):
+        listed_explicit = server.list_subdirectories_for_email("owner@example.com")
+        listed_token = server.list_subdirectories_for_email()
+    assert listed_explicit["email"] == "owner@example.com"
+    assert listed_explicit["count"] == 1
+    assert listed_explicit["subdirectories"][0]["subdirectory"] == name
+    assert listed_token["email"] == "token@example.com"
+    assert listed_token["count"] == 0
+
+
+def test_non_email_sub_claim_is_not_session_identity() -> None:
+    with oauth_token_claims({"sub": "gb-mcp-user"}):
+        result = server.list_subdirectories_for_email()
+    assert "model_request" in result
+    assert result["count"] == 0
+
+
+def test_load_binds_email_from_oauth_claims(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir, email="owner@example.com")
+    with oauth_token_claims({"email": "owner@example.com"}):
+        loaded = server.load_subdirectory_rom(subdirectory=name)
+        sent, images = _unwrap_input(
+            server.send_pyboy_input(subdirectory=name, buttons=["a"])
+        )
+        pinged = server.ping_pyboy(subdirectory=name)
+        saved = server.save_battery(subdirectory=name)
+        stopped = server.stop_pyboy(subdirectory=name)
+    assert loaded["started"] is True
+    assert loaded["email"] == "owner@example.com"
+    assert sent["sent"] is True
+    assert images
+    assert pinged["alive"] is True
+    assert saved["saved"] is True
+    assert stopped["stopped"] is True
+
+
+def test_load_explicit_email_overrides_oauth_claims(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir, email="owner@example.com")
+    with oauth_token_claims({"email": "token@example.com"}):
+        denied = server.load_subdirectory_rom(subdirectory=name)
+        loaded = server.load_subdirectory_rom("owner@example.com", name)
+    assert denied["started"] is False
+    assert "not mapped" in denied["error"]
+    assert loaded["started"] is True
+    assert loaded["email"] == "owner@example.com"
+
+
+def test_map_subdirectory_binds_from_oauth_claims(isolated_db, roms_dir: Path) -> None:
+    name = "b" * db.SUBDIRECTORY_NAME_LENGTH
+    (roms_dir / name).mkdir()
+    with oauth_token_claims({"email": "User@Example.com"}):
+        result = server.map_subdirectory_to_email(name)
+    assert result == {"mapped": True, "subdirectory": name, "email": "user@example.com"}
+
+
+def test_map_subdirectory_omitted_email_without_identity_returns_model_request(
+    isolated_db, roms_dir: Path
+) -> None:
+    name = "b" * db.SUBDIRECTORY_NAME_LENGTH
+    (roms_dir / name).mkdir()
+    result = server.map_subdirectory_to_email(name)
+    assert result["mapped"] is False
+    assert result["model_request"]["name"] == "email"
+    assert result["subdirectory"] == name
+
+
+def test_submit_maps_from_oauth_email_claim(
+    fake_docker, isolated_db, roms_dir: Path
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, _data: {"valid": True, "reason": "ok"},
+    )
+    with oauth_token_claims({"email": "oauth@example.com"}):
+        result = server.submit_gb_rom(_b64(make_rom()), filename="tetris.gb")
+    assert result["accepted"] is True
+    assert result["mapped"] is True
+    assert result["email"] == "oauth@example.com"
+    assert "model_request" not in result
 
 
 def _flatten_status_keys(payload: object, prefix: str = "") -> list[str]:

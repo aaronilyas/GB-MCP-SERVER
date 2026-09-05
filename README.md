@@ -8,7 +8,11 @@ SQLite (`user_subdirectories.sqlite3`). Mapped ROMs are played in a dedicated
 
 Email ↔ subdirectory mapping is application identity. It is **not** transport
 authentication. Remote HTTP clients authenticate with a bearer token **or**
-MCP OAuth 2.1; tools still take `email` arguments after that check succeeds.
+MCP OAuth 2.1. After that check succeeds, tools take an optional `email`
+argument. If `email` is omitted, an OAuth access token `email` or `sub` claim
+is used as the session identity. If there is no token identity, the tool
+returns a structured `model_request` asking for email — do not invent one
+(for example `trainer@x.ai`). An explicit `email` still wins when present.
 Do not ask the model to type the bearer token, a password, or an API key into
 a tool.
 
