@@ -34,9 +34,10 @@ checksum are required; file extension is not enough.
 Play is **not** in-process. `load_subdirectory_rom` starts or reuses
 `gb-play-<subdir hex>`, mounting only that subdirectory (ROM read-only, `.state`
 read-write). `send_pyboy_input` talks to that container through
-`gb_mcp/emulator` and still returns MCP PNG images. `stop_pyboy` and idle
-timeout write the save to the volume, then remove the container. The next load
-starts a new container and restores `roms/<subdir>/<rom>.state`.
+`gb_mcp/emulator` and still returns MCP PNG images. `save_battery` writes the
+cartridge save without stopping. `stop_pyboy` and idle timeout write the save
+to the volume, then remove the container. The next load starts a new container
+and restores `roms/<subdir>/<rom>.state`.
 
 One live session per email. Switching games saves and stops the old instance,
 then starts the new one. A dead instance returns a short tool error, not a
@@ -46,15 +47,23 @@ Docker dump.
 
 | Tool | Purpose |
 | --- | --- |
-| `submit_gb_rom` | Base64 ROM in; isolated Docker validation; persist on success |
+| `submit_gb_rom` | Base64 ROM in; isolated Docker validation; persist on success. Optional `boot=true` starts PyBoy after a mapped submit |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
 | `list_subdirectories_for_email` | List that user's games and header metadata |
-| `load_subdirectory_rom` | Start / resume a play instance for an owned directory |
-| `send_pyboy_input` | Button chords; returns PNG screenshot(s) |
+| `load_subdirectory_rom` | Start / resume a play instance (default speed uncapped; 45-minute idle) |
+| `send_pyboy_input` | Buttons, steps, macros, optional framebuffer `until`; returns PNG screenshot(s) at scale 4 |
+| `ping_pyboy` | Reset the idle timer without advancing emulation or pressing buttons |
+| `save_battery` | Write the cartridge save without stopping PyBoy |
 | `stop_pyboy` | Save, then remove the instance container |
 
-Idle sessions auto-save to the volume and remove the container after five
-minutes without button input.
+Play is screenshot-only: there is no memory or game-state tool. `until` and
+classifiers are derived from the native 160×144 LCD. Default
+`emulation_speed` is `0` (uncapped). Screenshots are nearest-neighbor
+upscaled (`screenshot_scale` default 4 → 640×576). Idle sessions auto-save
+to the volume and remove the container after **45 minutes** without
+`send_pyboy_input` or `ping_pyboy`. Agents should call `ping_pyboy` if they
+will think longer than about 30 seconds. Override idle with
+`GB_PYBOY_IDLE_TIMEOUT_SECONDS` (default 2700).
 
 ## Resources (read-only)
 
@@ -63,7 +72,7 @@ minutes without button input.
 | `gb://users/{email}/roms` | Owned ROM list and game metadata |
 | `gb://users/{email}/roms/{subdirectory}` | Cartridge header metadata for an owned ROM |
 | `gb://users/{email}/session` | Live play-instance status for that email |
-| `gb://usage` | How a connected model should use this server (submit, map, list, load, play, stop). Contains no user data. |
+| `gb://usage` | How a connected model should use this server (submit, map, list, load, play, ping, save, stop). Contains no user data. |
 
 ## Compose
 
