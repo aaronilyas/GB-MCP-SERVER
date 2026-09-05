@@ -20,10 +20,12 @@ from pathlib import Path
 from typing import Any
 
 from gb_mcp.emulator.loop import (
+    DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
     EmulatorSession,
     _default_pyboy_factory,
 )
+from gb_mcp.emulator.play_limits import DEFAULT_IDLE_TIMEOUT_SECONDS
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = int(os.environ.get("GB_INSTANCE_PORT", "8080"))
@@ -77,12 +79,15 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Play instance is no longer running"}, 503)
             return
         if self.path == "/input":
+            payload = dict(body)
+            payload.setdefault("steps", [])
+            if not payload.get("screenshot_mode"):
+                payload["screenshot_mode"] = "final"
             try:
                 result = session.submit(
                     "input",
                     timeout=INPUT_COMMAND_TIMEOUT_SECONDS,
-                    steps=body.get("steps") or [],
-                    screenshot_mode=body.get("screenshot_mode") or "final",
+                    **payload,
                 )
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"sent": False, "error": str(exc)}, 400)
@@ -90,6 +95,22 @@ class Handler(BaseHTTPRequestHandler):
             pngs = result.pop("pngs", [])
             result["pngs_b64"] = [base64.b64encode(png).decode("ascii") for png in pngs]
             self._send_json(result)
+            return
+        if self.path == "/ping":
+            try:
+                result = session.submit("ping", timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"alive": False, "error": str(exc)}, 400)
+                return
+            self._send_json(session.status(**result))
+            return
+        if self.path == "/save":
+            try:
+                result = session.submit("save", timeout=10)
+            except Exception as exc:  # noqa: BLE001
+                self._send_json({"saved": False, "error": str(exc)}, 400)
+                return
+            self._send_json(session.status(**result))
             return
         if self.path == "/stop":
             reason = str(body.get("reason") or "requested")
@@ -149,13 +170,21 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"error": "ROM path is missing"}), file=sys.stderr)
         return 1
     subdirectory = os.environ.get("GB_INSTANCE_SUBDIRECTORY", "local")
-    idle = float(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "300"))
+    idle = float(
+        os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", str(DEFAULT_IDLE_TIMEOUT_SECONDS))
+    )
+    speed_raw = os.environ.get("GB_PYBOY_EMULATION_SPEED", str(DEFAULT_EMULATION_SPEED)).strip()
+    try:
+        emulation_speed = int(speed_raw)
+    except ValueError:
+        emulation_speed = DEFAULT_EMULATION_SPEED
     session = EmulatorSession(
         email="instance",
         subdirectory=subdirectory,
         rom_path=rom,
         pyboy_factory=_default_pyboy_factory,
         idle_timeout_seconds=idle,
+        emulation_speed=emulation_speed,
     )
     STATE.session = session
     session.start()

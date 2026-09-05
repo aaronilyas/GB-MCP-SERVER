@@ -21,12 +21,15 @@ from gb_mcp.emulator.backend import (
 )
 from gb_mcp.emulator.loop import (
     BUTTONS,
+    DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
     MAX_HOLD_FRAMES,
     MAX_INPUT_STEPS,
     SCREENSHOT_MODES,
     PyBoyFactory,
 )
+
+_SUBMIT_OPS = frozenset({"input", "ping", "save"})
 
 
 class PlaySession:
@@ -157,15 +160,21 @@ class PlaySession:
                 self._mark_dead(reap=False)
 
     def submit(self, op: str, timeout: float = 10, **payload: Any) -> Any:
-        if op != "input":
+        if op not in _SUBMIT_OPS:
             raise ValueError(f"unknown PyBoy command {op!r}")
         if not self.is_running:
             raise InstanceDeadError(_dead_message(self.close_reason))
+        if op == "ping":
+            return self._backend.ping(self._handle, timeout=timeout)
+        if op == "save":
+            return self._backend.save(self._handle, timeout=timeout)
+        extra = {key: value for key, value in payload.items() if key not in {"steps", "screenshot_mode"}}
         return self._backend.send_input(
             self._handle,
-            payload["steps"],
-            payload["screenshot_mode"],
+            payload.get("steps") or [],
+            payload.get("screenshot_mode") or "final",
             timeout=timeout,
+            **extra,
         )
 
     def _mark_dead(self, *, reap: bool = True) -> None:
@@ -218,9 +227,25 @@ class SessionManager:
         with self._lock:
             return self._by_email.get(email)
 
-    def load(self, email: str, subdirectory: str, rom_path: Path) -> dict[str, Any]:
+    def load(
+        self,
+        email: str,
+        subdirectory: str,
+        rom_path: Path,
+        *,
+        emulation_speed: int | None = None,
+        idle_timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
         switched_from: str | None = None
         current: PlaySession | None = None
+        idle = (
+            float(idle_timeout_seconds)
+            if idle_timeout_seconds is not None
+            else self._idle_timeout()
+        )
+        speed = (
+            DEFAULT_EMULATION_SPEED if emulation_speed is None else int(emulation_speed)
+        )
         with self._lock:
             current = self._by_email.get(email)
             if current is not None and current.is_running:
@@ -242,7 +267,8 @@ class SessionManager:
                     email,
                     subdirectory,
                     rom_path,
-                    idle_timeout_seconds=self._idle_timeout(),
+                    idle_timeout_seconds=idle,
+                    emulation_speed=speed,
                 )
             except InstanceDeadError as exc:
                 return {
@@ -263,7 +289,7 @@ class SessionManager:
             session = PlaySession(
                 handle,
                 self._backend,
-                idle_timeout_seconds=self._idle_timeout(),
+                idle_timeout_seconds=idle,
             )
             self._by_email[email] = session
 
@@ -294,28 +320,76 @@ class SessionManager:
         *,
         steps: list[dict[str, Any]] | None = None,
         screenshot_mode: str = "final",
+        play_payload: dict[str, Any] | None = None,
+        **extra: Any,
     ) -> dict[str, Any]:
         session = self._require_running(email, subdirectory)
         if isinstance(session, dict):
             return session
-        if steps:
-            payload_steps = steps
+        if play_payload is None:
+            play_payload = extra.pop("play_payload", None)
+        if isinstance(play_payload, dict):
+            body = dict(play_payload)
+            body.update(extra)
+            body.setdefault("screenshot_mode", screenshot_mode)
+            if not body.get("steps"):
+                body.pop("steps", None)
+        elif steps:
+            body = {
+                "steps": steps,
+                "screenshot_mode": screenshot_mode,
+                "hold_frames": hold_frames,
+                **extra,
+            }
         elif buttons:
-            payload_steps = [{"buttons": buttons, "hold_frames": hold_frames}]
+            body = {
+                "buttons": buttons,
+                "hold_frames": hold_frames,
+                "screenshot_mode": screenshot_mode,
+                **extra,
+            }
         else:
             return session.status(sent=False, error="at least one button is required")
+        timeout = INPUT_COMMAND_TIMEOUT_SECONDS
+        raw_timeout = body.get("call_timeout_seconds")
+        if isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool):
+            timeout = max(timeout, float(raw_timeout) + 5.0)
         try:
-            result = session.submit(
-                "input",
-                timeout=INPUT_COMMAND_TIMEOUT_SECONDS,
-                steps=payload_steps,
-                screenshot_mode=screenshot_mode,
-            )
+            result = session.submit("input", timeout=timeout, **body)
         except InstanceDeadError as exc:
             return session.status(sent=False, error=str(exc))
         except Exception as exc:  # noqa: BLE001
             return session.status(sent=False, error=_tool_error(exc))
         return session.status(sent=True, **result)
+
+    def ping(self, email: str, subdirectory: str) -> dict[str, Any]:
+        session = self._require_running(email, subdirectory)
+        if isinstance(session, dict):
+            payload = dict(session)
+            payload.pop("sent", None)
+            payload["alive"] = False
+            return payload
+        try:
+            result = session.submit("ping", timeout=10)
+        except InstanceDeadError as exc:
+            return session.status(alive=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return session.status(alive=False, error=_tool_error(exc))
+        return session.status(**result)
+
+    def save_battery(self, email: str, subdirectory: str) -> dict[str, Any]:
+        session = self._require_running(email, subdirectory)
+        if isinstance(session, dict):
+            payload = dict(session)
+            payload.pop("sent", None)
+            return payload
+        try:
+            result = session.submit("save", timeout=10)
+        except InstanceDeadError as exc:
+            return session.status(saved=False, error=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            return session.status(saved=False, error=_tool_error(exc))
+        return session.status(**result)
 
     def stop(self, email: str, subdirectory: str) -> dict[str, Any]:
         with self._lock:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from gb_mcp.emulator.loop import (
+    DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
     EmulatorSession,
     PyBoyFactory,
@@ -58,6 +59,7 @@ class InstanceBackend(Protocol):
         rom_path: Path,
         *,
         idle_timeout_seconds: float,
+        emulation_speed: int = DEFAULT_EMULATION_SPEED,
     ) -> InstanceHandle: ...
 
     def is_running(self, handle: InstanceHandle) -> bool: ...
@@ -71,6 +73,21 @@ class InstanceBackend(Protocol):
         screenshot_mode: str,
         *,
         timeout: float = INPUT_COMMAND_TIMEOUT_SECONDS,
+        **extra: Any,
+    ) -> dict[str, Any]: ...
+
+    def ping(
+        self,
+        handle: InstanceHandle,
+        *,
+        timeout: float = 10,
+    ) -> dict[str, Any]: ...
+
+    def save(
+        self,
+        handle: InstanceHandle,
+        *,
+        timeout: float = 10,
     ) -> dict[str, Any]: ...
 
     def request_stop(self, handle: InstanceHandle, reason: str) -> None: ...
@@ -99,6 +116,7 @@ class InProcessBackend:
         rom_path: Path,
         *,
         idle_timeout_seconds: float,
+        emulation_speed: int = DEFAULT_EMULATION_SPEED,
     ) -> InstanceHandle:
         session = EmulatorSession(
             email,
@@ -106,6 +124,7 @@ class InProcessBackend:
             rom_path,
             pyboy_factory=self._pyboy_factory,
             idle_timeout_seconds=idle_timeout_seconds,
+            emulation_speed=emulation_speed,
         )
         session.start()
         session.wait_ready()
@@ -127,6 +146,13 @@ class InProcessBackend:
             raise InstanceDeadError("Play instance is no longer running")
         return handle.session.status()
 
+    def _live_session(self, handle: InstanceHandle) -> EmulatorSession:
+        session = handle.session
+        if session is None or not session.is_running:
+            reason = None if session is None else session.close_reason
+            raise InstanceDeadError(_dead_message(reason))
+        return session
+
     def send_input(
         self,
         handle: InstanceHandle,
@@ -134,17 +160,21 @@ class InProcessBackend:
         screenshot_mode: str,
         *,
         timeout: float = INPUT_COMMAND_TIMEOUT_SECONDS,
+        **extra: Any,
     ) -> dict[str, Any]:
-        session = handle.session
-        if session is None or not session.is_running:
-            reason = None if session is None else session.close_reason
-            raise InstanceDeadError(_dead_message(reason))
-        return session.submit(
+        return self._live_session(handle).submit(
             "input",
             timeout=timeout,
             steps=steps,
             screenshot_mode=screenshot_mode,
+            **extra,
         )
+
+    def ping(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
+        return self._live_session(handle).submit("ping", timeout=timeout)
+
+    def save(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
+        return self._live_session(handle).submit("save", timeout=timeout)
 
     def request_stop(self, handle: InstanceHandle, reason: str) -> None:
         if handle.session is not None:

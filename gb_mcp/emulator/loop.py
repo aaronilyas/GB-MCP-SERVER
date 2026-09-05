@@ -7,7 +7,6 @@ and the fake backend used by unit tests.
 
 from __future__ import annotations
 
-import io
 import os
 import tempfile
 import threading
@@ -17,46 +16,32 @@ from pathlib import Path
 from typing import Any
 
 from gb_mcp import config
-
-BUTTONS = frozenset({"a", "b", "start", "select", "up", "down", "left", "right"})
-MAX_HOLD_FRAMES = 120
-MAX_INPUT_STEPS = 30
-SCREENSHOT_MODES = frozenset({"final", "all"})
-# button(name, N) is held for N ticks and released on tick N+1; worst batch is
-# MAX_INPUT_STEPS * (MAX_HOLD_FRAMES + 1) frames at 60 fps, plus PNG encode.
-INPUT_COMMAND_TIMEOUT_SECONDS = (
-    MAX_INPUT_STEPS * (MAX_HOLD_FRAMES + 1)
-) / 60.0 + 30.0
+from gb_mcp.emulator.play_limits import (
+    BUTTONS,
+    DEFAULT_EMULATION_SPEED,
+    INPUT_COMMAND_TIMEOUT_SECONDS,
+    MAX_HOLD_FRAMES,
+    MAX_INPUT_STEPS,
+    SCREENSHOT_MODES,
+)
 PyBoyFactory = Callable[[Path], Any]
 REMOTE_STATUS_KEYS = (
     "restored_state",
     "restore_error",
     "idle_timeout_seconds",
     "seconds_until_idle_close",
+    "seconds_since_last_input",
     "cartridge_title",
     "saved",
     "close_reason",
+    "alive",
+    "emulation_speed",
 )
 
 
 def _state_path_for_rom(rom_path: Path) -> Path:
     """Return the PyBoy save-state path stored next to the ROM (`rom.gb.state`)."""
     return Path(str(rom_path) + ".state")
-
-
-def _png_from_screen(pyboy: Any) -> bytes:
-    """Encode the current PyBoy screen as PNG bytes. Must run on the emulator thread."""
-    screen = getattr(pyboy, "screen", None)
-    image = getattr(screen, "image", None) if screen is not None else None
-    if image is None:
-        raise RuntimeError("PyBoy screen image is unavailable")
-    snapshot = image.copy() if hasattr(image, "copy") else image
-    buf = io.BytesIO()
-    snapshot.save(buf, format="PNG")
-    data = buf.getvalue()
-    if not data:
-        raise RuntimeError("failed to encode PyBoy screenshot")
-    return data
 
 
 def shape_status(
@@ -160,6 +145,7 @@ class EmulatorSession:
         *,
         pyboy_factory: PyBoyFactory,
         idle_timeout_seconds: float,
+        emulation_speed: int = DEFAULT_EMULATION_SPEED,
     ) -> None:
         self.email = email
         self.subdirectory = subdirectory
@@ -172,6 +158,9 @@ class EmulatorSession:
         self.saved = False
         self._pyboy_factory = pyboy_factory
         self._idle_timeout = idle_timeout_seconds
+        self._emulation_speed = (
+            DEFAULT_EMULATION_SPEED if emulation_speed is None else int(emulation_speed)
+        )
         self._last_input_at = time.monotonic()
         self._commands: list[_Command] = []
         self._cmd_lock = threading.Lock()
@@ -234,6 +223,8 @@ class EmulatorSession:
             restored_state=self.restored_state,
             idle_timeout_seconds=self._idle_timeout,
             seconds_until_idle_close=round(self.seconds_until_idle_close(), 3),
+            seconds_since_last_input=round(self.seconds_since_last_input(), 3),
+            emulation_speed=self._emulation_speed,
             cartridge_title=self.cartridge_title,
         )
         if self.restore_error:
@@ -241,16 +232,25 @@ class EmulatorSession:
         payload.update(extra)
         return payload
 
+    def seconds_since_last_input(self) -> float:
+        return max(0.0, time.monotonic() - self._last_input_at)
+
     def _pop_commands(self) -> list[_Command]:
         with self._cmd_lock:
             commands = self._commands
             self._commands = []
-        self._cmd_available.clear()
-        return commands
+            self._cmd_available.clear()
+            return commands
 
     def _handle(self, command: _Command) -> None:
         if command.op == "input":
             command.complete(self._apply_input(command.payload))
+            return
+        if command.op == "ping":
+            command.complete(self._apply_ping())
+            return
+        if command.op == "save":
+            command.complete(self._apply_save())
             return
         if command.op == "stop":
             self.close_reason = command.payload.get("reason", "requested")
@@ -259,47 +259,51 @@ class EmulatorSession:
             return
         raise ValueError(f"unknown PyBoy command {command.op!r}")
 
+    def _apply_ping(self) -> dict[str, Any]:
+        self._last_input_at = time.monotonic()
+        return {
+            "alive": True,
+            "idle_timeout_seconds": self._idle_timeout,
+            "seconds_since_last_input": 0.0,
+        }
+
+    def _apply_save(self) -> dict[str, Any]:
+        self._save()
+        return {"saved": True}
+
     def _apply_input(self, payload: dict[str, Any]) -> dict[str, Any]:
-        steps: list[dict[str, Any]] = payload["steps"]
-        screenshot_mode: str = payload["screenshot_mode"]
+        # Lazy import: vision/numpy live in the play instance, not the MCP host image.
+        from gb_mcp.emulator.play_runtime import execute_play_command, strip_forbidden_keys
+
         pyboy = self._pyboy
         if pyboy is None:
             raise RuntimeError("PyBoy instance is not running")
-        if not steps:
-            raise ValueError("steps must not be empty")
-        if screenshot_mode not in SCREENSHOT_MODES:
-            raise ValueError("screenshot_mode must be 'final' or 'all'")
-
-        pngs: list[bytes] = []
-        ran: list[dict[str, Any]] = []
-        last_index = len(steps) - 1
-        for index, step in enumerate(steps):
-            buttons: list[str] = step["buttons"]
-            hold_frames: int = step["hold_frames"]
-            for button in buttons:
-                pyboy.button(button, hold_frames)
-            # Pressed for hold_frames ticks; released on tick hold_frames + 1.
-            still_running = pyboy.tick(hold_frames + 1, True)
-            if still_running is False:
-                raise RuntimeError("PyBoy session stopped while applying input")
-            ran.append(
-                {"buttons": buttons, "hold_frames": hold_frames, "step_index": index}
+        body = dict(payload)
+        nested = body.pop("play_payload", None)
+        if isinstance(nested, dict):
+            nested = dict(nested)
+            nested.update({key: value for key, value in body.items() if key not in nested})
+            body = nested
+        if not body.get("steps"):
+            body.pop("steps", None)
+        try:
+            result = execute_play_command(
+                pyboy,
+                body,
+                session_speed=self._emulation_speed,
             )
-            if screenshot_mode == "all" or index == last_index:
-                pngs.append(_png_from_screen(pyboy))
-
+        finally:
+            if hasattr(pyboy, "set_emulation_speed"):
+                try:
+                    pyboy.set_emulation_speed(self._emulation_speed)
+                except Exception:
+                    pass
         self._last_input_at = time.monotonic()
-        if screenshot_mode == "all":
-            labels = [{"step_index": step["step_index"]} for step in ran]
-        else:
-            labels = [{"step_index": last_index}]
-        return {
-            "steps": ran,
-            "screenshot_mode": screenshot_mode,
-            "screenshot_count": len(pngs),
-            "screenshots": labels,
-            "pngs": pngs,
-        }
+        pngs = result.get("pngs")
+        cleaned = strip_forbidden_keys(result)
+        if pngs is not None:
+            cleaned["pngs"] = pngs
+        return cleaned
 
     def _save(self) -> None:
         pyboy = self._pyboy
@@ -327,7 +331,7 @@ class EmulatorSession:
                 title = None
             self.cartridge_title = title or None
             if hasattr(pyboy, "set_emulation_speed"):
-                pyboy.set_emulation_speed(1)
+                pyboy.set_emulation_speed(self._emulation_speed)
             if self.state_path.is_file() and self.state_path.stat().st_size > 0:
                 try:
                     with self.state_path.open("rb") as fh:
@@ -339,20 +343,21 @@ class EmulatorSession:
             self._ready.set()
 
             while not self._stop_requested.is_set():
-                for command in self._pop_commands():
-                    try:
-                        self._handle(command)
-                    except Exception as exc:  # noqa: BLE001
-                        command.fail(exc)
+                commands = self._pop_commands()
+                if commands:
+                    for command in commands:
+                        try:
+                            self._handle(command)
+                        except Exception as exc:  # noqa: BLE001
+                            command.fail(exc)
+                    continue
                 if self._stop_requested.is_set():
                     break
-                if time.monotonic() - self._last_input_at >= self._idle_timeout:
+                remaining = self._idle_timeout - (time.monotonic() - self._last_input_at)
+                if remaining <= 0:
                     self.close_reason = "idle_timeout"
                     break
-                still_running = pyboy.tick()
-                if still_running is False:
-                    self.close_reason = "emulator_stopped"
-                    break
+                self._cmd_available.wait(timeout=remaining)
 
             try:
                 self._save()

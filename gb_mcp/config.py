@@ -16,7 +16,10 @@ INSTANCE_IMAGE = os.environ.get("GB_PYBOY_INSTANCE_IMAGE", "gb-pyboy-instance:la
 # Base64 expands 3 bytes -> 4 chars; reject before decode to bound host memory.
 MAX_ROM_B64_CHARS = (MAX_ROM_BYTES + 2) // 3 * 4
 # Close a PyBoy session after this many seconds with no model button input.
-IDLE_TIMEOUT_SECONDS = int(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "300"))
+# Default 45 minutes. Ping and input both reset the idle timer.
+IDLE_TIMEOUT_SECONDS = int(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "2700"))
+# Session-start emulation speed (0 = uncapped). Play instances also read this env.
+EMULATION_SPEED = int(os.environ.get("GB_PYBOY_EMULATION_SPEED", "0"))
 PYBOY_WINDOW = os.environ.get("GB_PYBOY_WINDOW", "null")
 
 

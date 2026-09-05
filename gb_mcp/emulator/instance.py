@@ -25,6 +25,7 @@ from gb_mcp.emulator.backend import (
     play_container_name,
 )
 from gb_mcp.emulator.loop import (
+    DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
     _state_path_for_rom,
     overlay_status,
@@ -43,6 +44,7 @@ class DockerInstanceBackend:
         rom_path: Path,
         *,
         idle_timeout_seconds: float,
+        emulation_speed: int = DEFAULT_EMULATION_SPEED,
     ) -> InstanceHandle:
         name = play_container_name(subdirectory)
         if _container_running(name):
@@ -61,6 +63,7 @@ class DockerInstanceBackend:
             subdirectory,
             rom_path,
             idle_timeout_seconds=idle_timeout_seconds,
+            emulation_speed=emulation_speed,
         )
         created = isolation._run_docker(args, timeout=60)
         if created.returncode != 0:
@@ -96,14 +99,16 @@ class DockerInstanceBackend:
         screenshot_mode: str,
         *,
         timeout: float = INPUT_COMMAND_TIMEOUT_SECONDS,
+        **extra: Any,
     ) -> dict[str, Any]:
         if not _container_running(handle.container_name):
             raise InstanceDeadError(_dead_message(_exit_close_reason(handle.container_name)))
+        body = {"steps": steps, "screenshot_mode": screenshot_mode, **extra}
         remote = _rpc(
             handle.container_name,
             "POST",
             "/input",
-            {"steps": steps, "screenshot_mode": screenshot_mode},
+            body,
             timeout=int(timeout) + 5,
         )
         if remote.get("error") and not remote.get("pngs_b64") and not remote.get("pngs"):
@@ -116,6 +121,22 @@ class DockerInstanceBackend:
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError("Play instance returned an invalid screenshot") from exc
         remote["pngs"] = pngs
+        return remote
+
+    def ping(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
+        if not _container_running(handle.container_name):
+            raise InstanceDeadError(_dead_message(_exit_close_reason(handle.container_name)))
+        remote = _rpc(handle.container_name, "POST", "/ping", {}, timeout=int(timeout) + 5)
+        if remote.get("error") and not remote.get("alive"):
+            raise RuntimeError(str(remote["error"]))
+        return remote
+
+    def save(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
+        if not _container_running(handle.container_name):
+            raise InstanceDeadError(_dead_message(_exit_close_reason(handle.container_name)))
+        remote = _rpc(handle.container_name, "POST", "/save", {}, timeout=int(timeout) + 5)
+        if remote.get("error") and not remote.get("saved"):
+            raise RuntimeError(str(remote["error"]))
         return remote
 
     def request_stop(self, handle: InstanceHandle, reason: str) -> None:
@@ -158,6 +179,7 @@ def play_create_args(
     rom_path: Path,
     *,
     idle_timeout_seconds: float,
+    emulation_speed: int = DEFAULT_EMULATION_SPEED,
     image: str | None = None,
 ) -> list[str]:
     """Return `docker run` args for a locked-down play instance.
@@ -210,6 +232,8 @@ def play_create_args(
         "GB_PYBOY_WINDOW=null",
         "-e",
         f"GB_PYBOY_IDLE_TIMEOUT_SECONDS={int(idle_timeout_seconds)}",
+        "-e",
+        f"GB_PYBOY_EMULATION_SPEED={int(emulation_speed)}",
         "-e",
         "PYTHONUNBUFFERED=1",
         "-e",
