@@ -20,6 +20,7 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
 )
+from gb_mcp.gb.header import assert_rom_playable
 
 
 def play_container_name(subdirectory: str) -> str:
@@ -120,6 +121,10 @@ class InProcessBackend:
         idle_timeout_seconds: float,
         emulation_speed: int = DEFAULT_EMULATION_SPEED,
     ) -> InstanceHandle:
+        try:
+            assert_rom_playable(rom_path)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from None
         session = EmulatorSession(
             email,
             subdirectory,

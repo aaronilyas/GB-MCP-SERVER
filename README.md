@@ -52,10 +52,10 @@ Docker dump.
 
 | Tool | Purpose |
 | --- | --- |
-| `submit_gb_rom` | Base64 ROM in; isolated Docker validation; persist on success. Optional `boot=true` starts PyBoy after a mapped submit. For ROMs that exceed the connector argument limit, use begin/append/finalize instead of one `rom_base64` string |
+| `submit_gb_rom` | Small homebrew only: one base64 ROM; isolated Docker validation; persist on success. Optional `subdirectory`+`email` replaces an owned mapping in place. Optional `boot=true` starts PyBoy after a mapped submit. 1 MiB dumps must use begin/append/finalize |
 | `begin_gb_rom_upload` | Start a chunked upload (`filename`, `total_bytes`, `sha256`) → `{upload_id, chunk_size}` |
 | `append_gb_rom_upload` | Append the next consecutive decoded chunk (`chunk_index` + `chunk_base64`) |
-| `finalize_gb_rom_upload` | Verify sha256/length, run the same isolated validator, persist, optional map/boot |
+| `finalize_gb_rom_upload` | Verify sha256/length, run the same isolated validator, persist, optional map/boot. Optional `subdirectory`+`email` overwrites that owned mapping in place |
 | `abort_gb_rom_upload` | Cancel an in-flight chunked upload and delete staging |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
 | `list_subdirectories_for_email` | List that user's games and header metadata, including `playable` |
@@ -91,15 +91,22 @@ host filesystem path. Use the three-tool ingest:
    For each slice `i = 0, 1, …` call
    `append_gb_rom_upload(upload_id, i, chunk_base64)`. Holes, oversized
    chunks, and `received_bytes > total_bytes` are rejected.
-4. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?)` concatenates
-   the staging files under `roms/.uploads/<upload_id>/` (mode `0700`),
-   verifies sha256 and length, then runs the **same** isolated validator
-   (`container up first`, ROM bytes on stdin `docker exec`, `--network=none`).
-   On success the ROM is persisted under `roms/<32-hex>/` and mapped/booted
-   like `submit_gb_rom`. Staging is always deleted. Call
+4. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?, subdirectory?)`
+   concatenates the staging files under `roms/.uploads/<upload_id>/` (mode
+   `0700`), verifies sha256 and length, then runs the **same** isolated
+   validator (`container up first`, ROM bytes on stdin `docker exec`,
+   `--network=none`). On success the ROM is persisted under `roms/<32-hex>/`
+   and mapped/booted like `submit_gb_rom`. Staging is always deleted. Call
    `abort_gb_rom_upload(upload_id)` to drop an in-flight upload without
    persisting. Abandoned uploads expire after 30 minutes; listing a user's
    games also reclaims expired staging.
+5. To replace an unplayable mapping (`list_subdirectories_for_email` shows
+   `playable: false`, for example a 1 KiB Pokémon header), pass the existing
+   32-hex id: `finalize_gb_rom_upload(upload_id, email=..., subdirectory=<id>)`.
+   That overwrites the `.gb` in that directory in place (same subdirectory
+   id). Omitting `subdirectory` allocates a new id. `submit_gb_rom` accepts
+   the same optional `subdirectory` for small homebrew. Never read a host
+   or sandbox attachment path into `rom_base64`.
 
 `submit_gb_rom` remains the right tool for small homebrew that fits in one
 argument.

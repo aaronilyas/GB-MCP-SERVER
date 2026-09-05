@@ -6,10 +6,12 @@ from pathlib import Path
 
 import pytest
 
+import db
 import server
 from gb_mcp import config
 from gb_mcp.gb.constants import MAX_ROM_BYTES
 from gb_mcp.storage import uploads as upload_store
+from gb_mcp.storage.roms import _rom_in_subdirectory
 
 from rom_builder import make_rom
 
@@ -29,6 +31,41 @@ def _b64(data: bytes) -> str:
 
 def _hex_rom_dirs(roms_dir: Path) -> list[Path]:
     return [p for p in roms_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+
+
+def _chunked_upload(rom: bytes, filename: str, email: str | None = None) -> str:
+    digest = hashlib.sha256(rom).hexdigest()
+    begun = server.begin_gb_rom_upload(filename, len(rom), digest, email=email)
+    assert begun["started"] is True
+    chunk_size = begun["chunk_size"]
+    upload_id = begun["upload_id"]
+    offset = 0
+    index = 0
+    while offset < len(rom):
+        piece = rom[offset : offset + chunk_size]
+        appended = server.append_gb_rom_upload(upload_id, index, _b64(piece))
+        assert appended["appended"] is True
+        offset += len(piece)
+        index += 1
+    return upload_id
+
+
+def _map_truncated(
+    roms_dir: Path,
+    *,
+    email: str = "owner@example.com",
+    name: str | None = None,
+    filename: str = "Pokemon_-_Red_Version_USA_Europe_.gb",
+) -> str:
+    name = name or ("c" * db.SUBDIRECTORY_NAME_LENGTH)
+    dest = roms_dir / name
+    dest.mkdir()
+    (dest / filename).write_bytes(
+        make_rom(size=1024, title=b"POKEMON RED", rom_size_code=0x05)
+    )
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, email)
+    return name
 
 
 def test_chunked_upload_persists_and_maps(
@@ -253,3 +290,133 @@ def test_list_reclaims_expired_uploads(
     listed = server.list_subdirectories_for_email("owner@example.com")
     assert listed["count"] == 0
     assert not dest.exists()
+
+
+def test_finalize_replace_owned_truncated_mapping(
+    fake_docker, isolated_db, roms_dir: Path, validator_module, pyboy_manager
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    name = _map_truncated(roms_dir)
+    truncated = roms_dir / name / "Pokemon_-_Red_Version_USA_Europe_.gb"
+    assert truncated.stat().st_size == 1024
+    full = make_rom(title=b"POKEMON RED")  # 32 KiB playable dump
+    upload_id = _chunked_upload(full, "red.gb", email="owner@example.com")
+    result = server.finalize_gb_rom_upload(
+        upload_id, email="owner@example.com", subdirectory=name
+    )
+    assert result["accepted"] is True
+    assert result["saved"] is True
+    assert result["mapped"] is True
+    assert result["subdirectory"] == name
+    hex_dirs = _hex_rom_dirs(roms_dir)
+    assert [p.name for p in hex_dirs] == [name]
+    chosen = _rom_in_subdirectory(name)
+    assert chosen.read_bytes() == full
+    assert not truncated.exists()
+    leftovers = [
+        p.name
+        for p in (roms_dir / name).iterdir()
+        if p.suffix.lower() in {".gb", ".gbc"}
+    ]
+    assert leftovers == [chosen.name]
+    listed = server.list_subdirectories_for_email("owner@example.com")
+    info = listed["subdirectories"][0]
+    assert info["subdirectory"] == name
+    game = info["games"][0]
+    assert game["playable"] is True
+    assert game["size_bytes"] == len(full)
+    rom_file = next(e for e in info["files"] if e["filename"].endswith(".gb"))
+    assert rom_file["playable"] is True
+    assert rom_file["size_bytes"] == len(full)
+    loaded = server.load_subdirectory_rom("owner@example.com", name)
+    assert loaded["started"] is True
+    assert loaded["running"] is True
+    assert loaded["subdirectory"] == name
+
+
+def test_finalize_subdirectory_not_owned_does_not_write(
+    fake_docker, isolated_db, roms_dir: Path, validator_module
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    name = _map_truncated(roms_dir, email="owner@example.com")
+    original = (roms_dir / name / "Pokemon_-_Red_Version_USA_Europe_.gb").read_bytes()
+    full = make_rom()
+    upload_id = _chunked_upload(full, "red.gb", email="intruder@example.com")
+    result = server.finalize_gb_rom_upload(
+        upload_id, email="intruder@example.com", subdirectory=name
+    )
+    assert result["accepted"] is False
+    assert result["saved"] is False
+    assert "not mapped" in result["error"]
+    assert (roms_dir / name / "Pokemon_-_Red_Version_USA_Europe_.gb").read_bytes() == original
+    assert _hex_rom_dirs(roms_dir) == [roms_dir / name]
+
+
+def test_finalize_unmapped_subdirectory_does_not_write(
+    fake_docker, isolated_db, roms_dir: Path, validator_module
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    name = "a" * db.SUBDIRECTORY_NAME_LENGTH
+    (roms_dir / name).mkdir()
+    marker = roms_dir / name / "keep.gb"
+    marker.write_bytes(b"keep")
+    full = make_rom()
+    upload_id = _chunked_upload(full, "red.gb", email="owner@example.com")
+    result = server.finalize_gb_rom_upload(
+        upload_id, email="owner@example.com", subdirectory=name
+    )
+    assert result["accepted"] is False
+    assert result["saved"] is False
+    assert "not mapped" in result["error"]
+    assert marker.read_bytes() == b"keep"
+    assert [p.name for p in (roms_dir / name).iterdir()] == ["keep.gb"]
+
+
+def test_finalize_invalid_subdirectory_does_not_persist(
+    fake_docker, isolated_db, roms_dir: Path, validator_module
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    full = make_rom()
+    upload_id = _chunked_upload(full, "red.gb", email="owner@example.com")
+    result = server.finalize_gb_rom_upload(
+        upload_id, email="owner@example.com", subdirectory="nope"
+    )
+    assert result["accepted"] is False
+    assert result["saved"] is False
+    assert "hexadecimal" in result["error"]
+    assert _hex_rom_dirs(roms_dir) == []
+
+
+def test_finalize_replace_requires_email(
+    fake_docker, isolated_db, roms_dir: Path, validator_module
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    name = _map_truncated(roms_dir)
+    original = (roms_dir / name / "Pokemon_-_Red_Version_USA_Europe_.gb").read_bytes()
+    full = make_rom()
+    upload_id = _chunked_upload(full, "red.gb")
+    result = server.finalize_gb_rom_upload(upload_id, subdirectory=name)
+    assert result["accepted"] is False
+    assert result["saved"] is False
+    assert "email is required" in result["error"]
+    assert (roms_dir / name / "Pokemon_-_Red_Version_USA_Europe_.gb").read_bytes() == original

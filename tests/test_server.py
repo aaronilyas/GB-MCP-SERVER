@@ -63,6 +63,77 @@ def test_submit_rejects_oversized_encoded_payload(monkeypatch: pytest.MonkeyPatc
     assert "maximum encoded size" in result["error"]
 
 
+def test_submit_replace_owned_truncated_mapping(
+    fake_docker, isolated_db, roms_dir: Path, validator_module, pyboy_manager
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    name = "d" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / name
+    dest.mkdir()
+    legacy = dest / "Pokemon_-_Red_Version_USA_Europe_.gb"
+    legacy.write_bytes(make_rom(size=1024, title=b"POKEMON RED", rom_size_code=0x05))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "owner@example.com")
+
+    full = make_rom(title=b"POKEMON RED")
+    result = server.submit_gb_rom(
+        _b64(full),
+        filename="red.gb",
+        email="owner@example.com",
+        subdirectory=name,
+    )
+    assert result["accepted"] is True
+    assert result["subdirectory"] == name
+    assert result["mapped"] is True
+    saved = config.ROOT / result["path"]
+    assert saved.read_bytes() == full
+    assert not legacy.exists()
+    hex_dirs = [p for p in roms_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    assert [p.name for p in hex_dirs] == [name]
+    listed = server.list_subdirectories_for_email("owner@example.com")
+    game = listed["subdirectories"][0]["games"][0]
+    assert game["playable"] is True
+    assert game["size_bytes"] == len(full)
+    loaded = server.load_subdirectory_rom("owner@example.com", name)
+    assert loaded["started"] is True
+    assert loaded["running"] is True
+
+
+def test_submit_subdirectory_not_owned_does_not_write(
+    fake_docker, isolated_db, roms_dir: Path, validator_module
+) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    name = "e" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / name
+    dest.mkdir()
+    original = make_rom(size=1024, title=b"POKEMON RED", rom_size_code=0x05)
+    (dest / "red.gb").write_bytes(original)
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "owner@example.com")
+
+    result = server.submit_gb_rom(
+        _b64(make_rom()),
+        filename="other.gb",
+        email="intruder@example.com",
+        subdirectory=name,
+    )
+    assert result["accepted"] is False
+    assert result["saved"] is False
+    assert "not mapped" in result["error"]
+    assert (dest / "red.gb").read_bytes() == original
+    assert list(dest.glob("*.gb")) == [dest / "red.gb"]
+    hex_dirs = [p for p in roms_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    assert [p.name for p in hex_dirs] == [name]
+
+
 def test_submit_header_only_pokemon_rejected(
     fake_docker, isolated_db, roms_dir: Path, validator_module
 ) -> None:
@@ -272,8 +343,12 @@ def test_load_truncated_rom_does_not_start_session(
     pyboy_manager._backend.start = wrapped  # type: ignore[method-assign]
     result = server.load_subdirectory_rom("owner@example.com", name)
     assert result["started"] is False
+    assert result["running"] is False
     assert "1024" in result["error"]
     assert "1048576" in result["error"]
+    assert "0x05" in result["error"]
+    assert "finalize_gb_rom_upload" in result["error"]
+    assert f"subdirectory={name}" in result["error"]
     assert started == []
     assert pyboy_manager.get("owner@example.com") is None
 
@@ -290,9 +365,15 @@ def test_list_exposes_playable_false_for_truncated(
     with db.session_scope() as session:
         db.map_subdirectory_to_email(session, name, "owner@example.com")
     result = server.list_subdirectories_for_email("owner@example.com")
-    game = result["subdirectories"][0]["games"][0]
+    info = result["subdirectories"][0]
+    game = info["games"][0]
     assert game["playable"] is False
     assert "1024" in game["unplayable_reason"]
+    assert "1048576" in game["unplayable_reason"]
+    rom_file = next(e for e in info["files"] if e["filename"] == "red.gb")
+    assert rom_file["playable"] is False
+    assert "1024" in rom_file["unplayable_reason"]
+    assert "1048576" in rom_file["unplayable_reason"]
 
 
 def test_load_subdirectory_rom_requires_rom_file(isolated_db, roms_dir: Path, pyboy_manager) -> None:

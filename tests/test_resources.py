@@ -106,3 +106,11 @@ def test_usage_resource_omits_ops_secrets() -> None:
     body = server.usage_resource()
     for needle in _OPS_SUBSTRINGS:
         assert needle not in body, needle
+
+
+def test_usage_resource_describes_unplayable_replace() -> None:
+    body = server.usage_resource()
+    assert "playable" in body
+    assert "subdirectory" in body
+    assert "sandbox attachment path" in body
+    assert "finalize_gb_rom_upload" in body

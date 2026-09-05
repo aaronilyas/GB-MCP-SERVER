@@ -38,11 +38,17 @@ def _allocate_subdirectory_name() -> str:
     raise RuntimeError("failed to allocate a unique 32-character subdirectory name")
 
 
-def _persist_validated_rom(subdirectory: str, safe_name: str, rom_bytes: bytes) -> Path:
+def _persist_validated_rom(
+    subdirectory: str,
+    safe_name: str,
+    rom_bytes: bytes,
+    *,
+    replace: bool = False,
+) -> Path:
     dest_dir = config.ROMS_DIR / subdirectory
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / safe_name
-    if dest.exists():
+    if not replace and dest.exists():
         dest = dest_dir / f"{dest.stem}-{uuid.uuid4().hex[:8]}{dest.suffix}"
 
     # Persist only after in-container validation succeeded.
@@ -60,6 +66,21 @@ def _persist_validated_rom(subdirectory: str, safe_name: str, rom_bytes: bytes) 
         except OSError:
             pass
         raise
+
+    if replace:
+        dest_resolved = dest.resolve()
+        for path in _iter_subdirectory_files(dest_dir):
+            if path.suffix.lower() not in ROM_SUFFIXES:
+                continue
+            try:
+                if path.resolve() == dest_resolved:
+                    continue
+            except OSError:
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                pass
     return dest
 
 

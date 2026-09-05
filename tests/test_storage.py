@@ -66,6 +66,29 @@ def test_persist_validated_rom_collision_gets_suffix(roms_dir: Path) -> None:
     assert second.read_bytes() == b"two"
 
 
+def test_persist_replace_overwrites_same_name_and_deletes_sibling(roms_dir: Path) -> None:
+    dest_dir = roms_dir / "abc"
+    first = _persist_validated_rom("abc", "old.gb", b"tiny")
+    sibling = _persist_validated_rom("abc", "also.gb", b"also")
+    assert first.read_bytes() == b"tiny"
+    replaced = _persist_validated_rom("abc", "old.gb", b"complete-rom", replace=True)
+    assert replaced.name == "old.gb"
+    assert replaced.read_bytes() == b"complete-rom"
+    names = sorted(p.name for p in dest_dir.iterdir() if p.is_file() and not p.name.startswith("."))
+    assert names == ["old.gb"]
+    assert not sibling.exists()
+
+
+def test_persist_replace_new_filename_removes_truncated_sibling(roms_dir: Path) -> None:
+    dest_dir = roms_dir / "abc"
+    _persist_validated_rom("abc", "Pokemon_-_Red_Version_USA_Europe_.gb", b"tiny")
+    replaced = _persist_validated_rom("abc", "red.gb", b"complete-rom", replace=True)
+    assert replaced.name == "red.gb"
+    assert replaced.read_bytes() == b"complete-rom"
+    names = sorted(p.name for p in dest_dir.iterdir() if p.is_file() and not p.name.startswith("."))
+    assert names == ["red.gb"]
+
+
 def test_allocate_subdirectory_name_unique_on_disk_and_db(
     isolated_db, roms_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
