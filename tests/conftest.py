@@ -67,6 +67,12 @@ class FakeScreen:
     def image(self) -> PILImage.Image:
         return self._emu._make_image()
 
+    @property
+    def ndarray(self):
+        import numpy as np
+
+        return np.asarray(self.image.convert("RGBA"))
+
 
 class FakePyBoy:
     """Stand-in for PyBoy so session tests do not start a real emulator."""
@@ -75,7 +81,10 @@ class FakePyBoy:
         self.gamerom = str(rom_path)
         self.cartridge_title = "TESTGAME"
         self.buttons: list[tuple[str, int]] = []
+        self.presses: list[str] = []
+        self.releases: list[str] = []
         self.tick_calls: list[int] = []
+        self.tick_renders: list[bool] = []
         self.captures: list[int] = []
         self.ticks = 0
         self.stopped = False
@@ -86,6 +95,7 @@ class FakePyBoy:
         self._pressed: set[str] = set()
         self._releases: list[list[object]] = []
         self._dead = threading.Event()
+        self.frame_factory = None  # optional callable(ticks, pressed) -> PIL Image
 
     def set_emulation_speed(self, speed: int) -> None:
         self.speed = speed
@@ -94,6 +104,14 @@ class FakePyBoy:
         self.buttons.append((name, delay))
         self._pressed.add(name)
         self._releases.append([name, delay])
+
+    def button_press(self, name: str) -> None:
+        self.presses.append(name)
+        self._pressed.add(name)
+
+    def button_release(self, name: str) -> None:
+        self.releases.append(name)
+        self._pressed.discard(name)
 
     def save_state(self, fh) -> None:
         fh.write(b"FAKESTATE")
@@ -105,6 +123,7 @@ class FakePyBoy:
         if self._dead.is_set():
             return False
         self.tick_calls.append(count)
+        self.tick_renders.append(bool(render))
         self._dead.wait(0.01)
         n = count if isinstance(count, int) and count > 0 else 0
         for _ in range(n):
@@ -129,6 +148,10 @@ class FakePyBoy:
         self._releases = still
 
     def _make_image(self) -> PILImage.Image:
+        if self.frame_factory is not None:
+            image = self.frame_factory(self.ticks, set(self._pressed))
+            self.captures.append(self.ticks)
+            return image
         # Unique per capture: ticks in RGB, plus a pixel for currently held buttons.
         color = (self.ticks & 255, (self.ticks >> 8) & 255, 80)
         image = PILImage.new("RGB", (160, 144), color=color)
