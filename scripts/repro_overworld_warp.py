@@ -38,10 +38,12 @@ from gb_mcp.emulator.input_engine import (  # noqa: E402
 )
 from gb_mcp.emulator.input_schema import parse_play_input  # noqa: E402
 from gb_mcp.emulator.loop import (  # noqa: E402
+    POST_RESTORE_SETTLE_FRAMES,
     _default_pyboy_factory,
     _state_path_for_rom,
 )
 from gb_mcp.emulator.play_limits import (  # noqa: E402
+    BUTTONS,
     DEFAULT_EMULATION_SPEED,
     DEFAULT_HASH_REGIONS,
     DEFAULT_SCREENSHOT_SCALE,
@@ -101,6 +103,18 @@ def boot_pyboy(
         restore_error: str | None = None
         if restore:
             restored, restore_error = try_restore(pyboy, state_path)
+            if restored:
+                # Match EmulatorSession._restore_snapshot: PyBoy tick(n, True)
+                # composes only the last frame of the batch.
+                release = getattr(pyboy, "button_release", None)
+                if callable(release):
+                    for name in BUTTONS:
+                        try:
+                            release(name)
+                        except Exception:  # noqa: BLE001
+                            continue
+                for _ in range(POST_RESTORE_SETTLE_FRAMES):
+                    pyboy.tick(1, render=True)
         return pyboy, restored, restore_error
     except Exception:
         stop = getattr(pyboy, "stop", None)

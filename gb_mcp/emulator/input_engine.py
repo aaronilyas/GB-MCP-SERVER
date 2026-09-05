@@ -54,6 +54,7 @@ def run_play_input(
     stop_reason: str | None = None
     until_fired = False
     final_recorded = False
+    last_lcd_rendered = False
     phase_idx = 0
     phase_progress = 0
     chord_changed = False
@@ -106,6 +107,7 @@ def run_play_input(
             phase_progress += chunk
 
             if need_render:
+                last_lcd_rendered = True
                 frame = capture_native() if capture_native is not None else None
                 if need_eval and until_monitor is not None:
                     decision = until_monitor.evaluate(frame, eval_index)
@@ -158,6 +160,11 @@ def run_play_input(
             stop_reason = "completed"
 
     if not final_recorded and screenshot_plan is not None:
+        # Timeout / empty-phase exit may follow render=False ticks, which skip
+        # LCD compose. One tick(1, True) produces the buffer capture_native reads.
+        # Do not tick when nothing ran this call — keep the prior composed LCD.
+        if frames_advanced > 0 and not last_lcd_rendered:
+            _tick_or_die(pyboy, 1, True)
         frame = capture_native() if capture_native is not None else None
         screenshot_plan.record(
             frames_advanced, frame, interrupt=False, final=True
@@ -244,8 +251,9 @@ def _tick_chunk(
     if count <= 0:
         return
     # A new button chord needs tick(1, render=True) before any render=False
-    # batch so LCD/PPU run (Gen 1 warps/collision). PyBoy only draws the last
-    # frame of tick(n, render=True); capture / until-eval still render last.
+    # batch so LCD/PPU run (Gen 1 warps/collision). PyBoy tick(n, render=True)
+    # composes only the last frame; never pass n>1 with render=True. Capture
+    # and until-eval use render_last so the captured LCD is tick(1, True).
     if render_first:
         _tick_or_die(pyboy, 1, True)
         count -= 1

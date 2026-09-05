@@ -19,7 +19,7 @@ from gb_mcp.emulator.backend import (
     InstanceHandle,
     _dead_message,
 )
-from gb_mcp.emulator.loop import PyBoyFactory, _state_path_for_rom
+from gb_mcp.emulator.loop import PyBoyFactory, _state_path_for_rom, rewrite_host_email
 from gb_mcp.emulator.play_limits import (
     DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
@@ -154,6 +154,7 @@ class PlaySession:
         payload.setdefault("idle_timeout_seconds", self._idle_timeout)
         if self.close_reason and "close_reason" not in payload:
             payload["close_reason"] = self.close_reason
+        rewrite_host_email(extra, self.email)
         payload.update(extra)
         payload["email"] = self.email
         return payload
@@ -178,19 +179,27 @@ class PlaySession:
         if not self.is_running:
             raise InstanceDeadError(_dead_message(self.close_reason))
         if op == "ping":
-            return self._backend.ping(self._handle, timeout=timeout)
-        if op == "save":
-            return self._backend.save(self._handle, timeout=timeout)
-        if op == "discard_state":
-            return self._backend.discard_state(self._handle, timeout=timeout)
-        extra = {key: value for key, value in payload.items() if key not in {"steps", "screenshot_mode"}}
-        return self._backend.send_input(
-            self._handle,
-            payload.get("steps") or [],
-            payload.get("screenshot_mode") or "final",
-            timeout=timeout,
-            **extra,
-        )
+            result = self._backend.ping(self._handle, timeout=timeout)
+        elif op == "save":
+            result = self._backend.save(self._handle, timeout=timeout)
+        elif op == "discard_state":
+            result = self._backend.discard_state(self._handle, timeout=timeout)
+        else:
+            extra = {
+                key: value
+                for key, value in payload.items()
+                if key not in {"steps", "screenshot_mode"}
+            }
+            result = self._backend.send_input(
+                self._handle,
+                payload.get("steps") or [],
+                payload.get("screenshot_mode") or "final",
+                timeout=timeout,
+                **extra,
+            )
+        if isinstance(result, dict):
+            rewrite_host_email(result, self.email)
+        return result
 
     def _mark_dead(self, *, reap: bool = True) -> None:
         if self._known_dead:
@@ -342,7 +351,7 @@ class SessionManager:
     ) -> dict[str, Any]:
         session = self._require_running(email, subdirectory)
         if isinstance(session, dict):
-            return session
+            return _echo_mapped_email(session, email)
         if play_payload is None:
             play_payload = extra.pop("play_payload", None)
         if isinstance(play_payload, dict):
@@ -366,7 +375,10 @@ class SessionManager:
                 **extra,
             }
         else:
-            return session.status(sent=False, error="at least one button is required")
+            return _echo_mapped_email(
+                session.status(sent=False, error="at least one button is required"),
+                email,
+            )
         timeout = INPUT_COMMAND_TIMEOUT_SECONDS
         raw_timeout = body.get("call_timeout_seconds")
         if isinstance(raw_timeout, (int, float)) and not isinstance(raw_timeout, bool):
@@ -374,10 +386,12 @@ class SessionManager:
         try:
             result = session.submit("input", timeout=timeout, **body)
         except InstanceDeadError as exc:
-            return session.status(sent=False, error=str(exc))
+            return _echo_mapped_email(session.status(sent=False, error=str(exc)), email)
         except Exception as exc:  # noqa: BLE001
-            return session.status(sent=False, error=_tool_error(exc))
-        return session.status(sent=True, **result)
+            return _echo_mapped_email(
+                session.status(sent=False, error=_tool_error(exc)), email
+            )
+        return _echo_mapped_email(session.status(sent=True, **result), email)
 
     def ping(self, email: str, subdirectory: str) -> dict[str, Any]:
         session = self._require_running(email, subdirectory)
@@ -385,42 +399,50 @@ class SessionManager:
             payload = dict(session)
             payload.pop("sent", None)
             payload["alive"] = False
-            return payload
+            return _echo_mapped_email(payload, email)
         try:
             result = session.submit("ping", timeout=10)
         except InstanceDeadError as exc:
-            return session.status(alive=False, error=str(exc))
+            return _echo_mapped_email(session.status(alive=False, error=str(exc)), email)
         except Exception as exc:  # noqa: BLE001
-            return session.status(alive=False, error=_tool_error(exc))
-        return session.status(**result)
+            return _echo_mapped_email(
+                session.status(alive=False, error=_tool_error(exc)), email
+            )
+        return _echo_mapped_email(session.status(**result), email)
 
     def save_battery(self, email: str, subdirectory: str) -> dict[str, Any]:
         session = self._require_running(email, subdirectory)
         if isinstance(session, dict):
             payload = dict(session)
             payload.pop("sent", None)
-            return payload
+            return _echo_mapped_email(payload, email)
         try:
             result = session.submit("save", timeout=10)
         except InstanceDeadError as exc:
-            return session.status(saved=False, error=str(exc))
+            return _echo_mapped_email(session.status(saved=False, error=str(exc)), email)
         except Exception as exc:  # noqa: BLE001
-            return session.status(saved=False, error=_tool_error(exc))
-        return session.status(**result)
+            return _echo_mapped_email(
+                session.status(saved=False, error=_tool_error(exc)), email
+            )
+        return _echo_mapped_email(session.status(**result), email)
 
     def discard_state(self, email: str, subdirectory: str) -> dict[str, Any]:
         session = self._require_running(email, subdirectory)
         if isinstance(session, dict):
             payload = dict(session)
             payload.pop("sent", None)
-            return payload
+            return _echo_mapped_email(payload, email)
         try:
             result = session.submit("discard_state", timeout=10)
         except InstanceDeadError as exc:
-            return session.status(discarded=False, error=str(exc))
+            return _echo_mapped_email(
+                session.status(discarded=False, error=str(exc)), email
+            )
         except Exception as exc:  # noqa: BLE001
-            return session.status(discarded=False, error=_tool_error(exc))
-        return session.status(**result)
+            return _echo_mapped_email(
+                session.status(discarded=False, error=_tool_error(exc)), email
+            )
+        return _echo_mapped_email(session.status(**result), email)
 
     def reset(
         self,
@@ -555,6 +577,12 @@ def _unlink_snapshot(rom_path: Path) -> bool:
         return False
     except OSError:
         return False
+
+
+def _echo_mapped_email(payload: dict[str, Any], email: str) -> dict[str, Any]:
+    """Force tool replies to the caller email, never the instance placeholder."""
+    payload["email"] = email
+    return payload
 
 
 def _tool_error(exc: BaseException) -> str:

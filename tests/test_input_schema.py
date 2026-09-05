@@ -7,6 +7,7 @@ import pytest
 from gb_mcp.emulator.input_schema import parse_play_input
 from gb_mcp.emulator.play_limits import (
     DEFAULT_EMULATION_SPEED,
+    DEFAULT_HOLD_ABORT_LUMA_JUMP,
     DEFAULT_HOLD_ABORT_THRESHOLD,
     DEFAULT_SCREENSHOT_SCALE,
     MAX_HOLD_FRAMES,
@@ -62,6 +63,7 @@ def test_hold_macro_defaults_and_default_abort() -> None:
     assert play.max_frames == 200
     assert play.apply_default_hold_abort is True
     assert play.default_hold_abort_threshold == DEFAULT_HOLD_ABORT_THRESHOLD
+    assert play.default_hold_abort_luma_jump == DEFAULT_HOLD_ABORT_LUMA_JUMP
     assert play.emulation_speed == DEFAULT_EMULATION_SPEED
     assert play.screenshot_scale == DEFAULT_SCREENSHOT_SCALE
 

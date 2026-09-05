@@ -28,6 +28,7 @@ from gb_mcp.gb.header import assert_rom_playable
 from gb_mcp.emulator.loop import (
     _state_path_for_rom,
     overlay_status,
+    rewrite_host_email,
     shape_status,
 )
 from gb_mcp.emulator.play_limits import (
@@ -100,7 +101,7 @@ class DockerInstanceBackend:
             payload = _host_status(handle, running=False, close_reason=reason)
             return payload
         remote = _rpc(handle.container_name, "GET", "/status", None, timeout=15)
-        return _overlay_host_status(handle, remote)
+        return _forwarded_rpc(handle, _overlay_host_status(handle, remote))
 
     def send_input(
         self,
@@ -135,7 +136,7 @@ class DockerInstanceBackend:
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError("Play instance returned an invalid screenshot") from exc
         remote["pngs"] = pngs
-        return remote
+        return _forwarded_rpc(handle, remote)
 
     def ping(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
         if not _container_running(handle.container_name):
@@ -143,7 +144,7 @@ class DockerInstanceBackend:
         remote = _rpc(handle.container_name, "POST", "/ping", {}, timeout=int(timeout) + 5)
         if remote.get("error") and not remote.get("alive"):
             raise RuntimeError(str(remote["error"]))
-        return remote
+        return _forwarded_rpc(handle, remote)
 
     def save(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
         if not _container_running(handle.container_name):
@@ -151,7 +152,7 @@ class DockerInstanceBackend:
         remote = _rpc(handle.container_name, "POST", "/save", {}, timeout=int(timeout) + 5)
         if remote.get("error") and not remote.get("saved"):
             raise RuntimeError(str(remote["error"]))
-        return remote
+        return _forwarded_rpc(handle, remote)
 
     def discard_state(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
         if not _container_running(handle.container_name):
@@ -161,7 +162,7 @@ class DockerInstanceBackend:
         )
         if remote.get("error") and "discarded" not in remote:
             raise RuntimeError(str(remote["error"]))
-        return remote
+        return _forwarded_rpc(handle, remote)
 
     def request_stop(self, handle: InstanceHandle, reason: str) -> None:
         if not _container_running(handle.container_name):
@@ -525,6 +526,17 @@ def _overlay_host_status(handle: InstanceHandle, remote: dict[str, Any]) -> dict
         _host_status(handle, running=bool(remote.get("running", True))),
         remote,
     )
+
+
+def _forwarded_rpc(handle: InstanceHandle, remote: dict[str, Any]) -> dict[str, Any]:
+    """Replace instance-placeholder identity on a forwarded RPC body.
+
+    Does not run ``overlay_status``: input replies include ``frames_advanced`` /
+    ``pngs`` / classifiers that are not in ``REMOTE_STATUS_KEYS``.
+    """
+    if "subdirectory" in remote:
+        remote["subdirectory"] = handle.subdirectory
+    return rewrite_host_email(remote, handle.email)
 
 
 # Imported by tests that assert bind-mount construction.

@@ -107,6 +107,39 @@ If restore/engine walk through the door at interval 4, rerun with interval 1
 Same command with `--mode engine`. If interval 1 warps and interval 4 does
 not, the failure tracks `tick(n, render=False)` on intermediate frames.
 
+## Interior black slab (window layer)
+
+Capture a `.state` **inside a room** that uses the GB window (a house, lab,
+Poké Center — not only a door tile), then compare restore / engine / cold.
+
+A healthy interior PNG is the full composited 160×144 LCD: floor, furniture,
+sprites. A real textbox is a dark frame with a **light** inner pane at the
+bottom (~`y >= 96`). A full-screen fade-to-black on warp is OK.
+
+A **stale black slab** is a near-black rectangle (bottom third, top half, or
+right half) while sprites still animate in the rest of the frame. That is a
+leftover window layer after `tick(n, render=True)` skipped compose on all but
+the last frame of the batch. Production restore now does 8× `tick(1,
+render=True)` with buttons released; capture frames also compose with
+`tick(1, render=True)`.
+
+```bash
+.venv/bin/python scripts/repro_overworld_warp.py \
+  --rom ROM \
+  --mode restore \
+  --direction up \
+  --frames 60
+```
+
+Open `*_before.png`. If the room is fully drawn, restore settle composed the
+LCD. If a black rectangle sits over a still-moving interior, rerun with
+`--until-eval-interval 1`. Interval 1 full and interval 4 slabbed means
+intermediate `render=False` ticks skipped window compose.
+
+Do not use map id / WY peeks. `classifiers_after.window_occluded_likely` is
+local debug on this script’s stdout (and an optional MCP classifier); it must
+not drive input.
+
 Other useful flags:
 
 | Flag | Default | Notes |

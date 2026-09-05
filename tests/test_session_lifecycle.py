@@ -12,6 +12,7 @@ from gb_mcp.emulator.loop import (
     POST_RESTORE_SETTLE_FRAMES,
     _ram_path_for_rom,
     overlay_status,
+    rewrite_host_email,
 )
 from gb_mcp.emulator.play_limits import BUTTONS
 from gb_mcp.emulator.session import SessionManager
@@ -78,6 +79,7 @@ def test_save_battery_writes_snapshot_and_keeps_session_running(
 
     result = pyboy_manager.save_battery("owner@example.com", name)
     assert result["saved"] is True
+    assert result["email"] == "owner@example.com"
     assert state.is_file() and state.read_bytes() == b"FAKESTATE"
     assert not ram.exists()
     assert pyboy.stopped is False
@@ -235,8 +237,8 @@ def test_restore_settles_eight_frames_buttons_released(
     pyboy = created[0]
     assert pyboy.loaded_state == b"FAKESTATE"
     assert pyboy.ticks == POST_RESTORE_SETTLE_FRAMES
-    assert pyboy.tick_calls == [POST_RESTORE_SETTLE_FRAMES]
-    assert pyboy.tick_renders == [True]
+    assert pyboy.tick_calls == [1] * POST_RESTORE_SETTLE_FRAMES
+    assert pyboy.tick_renders == [True] * POST_RESTORE_SETTLE_FRAMES
     assert BUTTONS.issubset(set(pyboy.releases))
     assert pyboy._pressed == set()
 
@@ -381,6 +383,13 @@ def test_status_keeps_host_email_over_instance_placeholder(
     assert overlaid["email"] == "owner@example.com"
     assert overlaid["restored_state"] is True
     assert overlaid["running"] is True
+    save_overlaid = overlay_status(
+        {"email": "player@example.com", "running": True},
+        {"email": "instance", "saved": True},
+    )
+    assert save_overlaid["email"] == "player@example.com"
+    assert save_overlaid["saved"] is True
+    assert save_overlaid["running"] is True
 
 
 def test_reset_stops_unlinks_snapshot_and_cold_boots(
@@ -501,3 +510,148 @@ def test_reset_discard_true_forces_restore_false(
     assert result["discarded"] is True
     assert created[0].loaded_state is None
     assert not _state_path_for_rom(rom_path).exists()
+
+
+class LeakySaveBackend(FakeInstanceBackend):
+    """Simulate a Docker instance that stamps email='instance' on RPC replies."""
+
+    def save(self, handle, *, timeout=10):
+        result = dict(super().save(handle, timeout=timeout))
+        result["email"] = "instance"
+        return result
+
+    def ping(self, handle, *, timeout=10):
+        result = dict(super().ping(handle, timeout=timeout))
+        result["email"] = "instance"
+        return result
+
+    def send_input(self, handle, steps, screenshot_mode, *, timeout=10, **extra):
+        result = dict(
+            super().send_input(
+                handle, steps, screenshot_mode, timeout=timeout, **extra
+            )
+        )
+        result["email"] = "instance"
+        return result
+
+    def status(self, handle):
+        payload = dict(super().status(handle))
+        payload["email"] = "instance"
+        return payload
+
+
+def test_rewrite_host_email_on_save_shaped_remote() -> None:
+    rewritten = rewrite_host_email(
+        {"email": "instance", "saved": True},
+        "player@example.com",
+    )
+    assert rewritten["email"] == "player@example.com"
+    assert rewritten["saved"] is True
+    input_shaped = rewrite_host_email(
+        {
+            "email": "instance",
+            "frames_advanced": 8,
+            "pngs": [b"png"],
+            "classifiers": {"overworld": True},
+        },
+        "player@example.com",
+    )
+    assert input_shaped["email"] == "player@example.com"
+    assert input_shaped["frames_advanced"] == 8
+    assert input_shaped["pngs"] == [b"png"]
+    assert input_shaped["classifiers"] == {"overworld": True}
+    assert "email" not in rewrite_host_email({"saved": True}, "player@example.com")
+    assert rewrite_host_email({"email": "instance"}, None)["email"] == "instance"
+
+
+def test_save_battery_rewrites_instance_placeholder_email(
+    isolated_db, roms_dir: Path
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir, email="player@example.com")
+    manager = SessionManager(
+        backend=LeakySaveBackend(FakePyBoy),
+        idle_timeout_seconds=30,
+    )
+    try:
+        loaded = manager.load("player@example.com", name, rom_path)
+        assert loaded["email"] == "player@example.com"
+        result = manager.save_battery("player@example.com", name)
+        assert result["saved"] is True
+        assert result["email"] == "player@example.com"
+        pinged = manager.ping("player@example.com", name)
+        assert pinged["alive"] is True
+        assert pinged["email"] == "player@example.com"
+        sent = manager.send_input("player@example.com", name, ["a"])
+        assert sent["sent"] is True
+        assert sent["email"] == "player@example.com"
+    finally:
+        manager.shutdown()
+
+
+def test_docker_rpc_rewrites_instance_email(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gb_mcp.emulator.backend import InstanceHandle
+    from gb_mcp.emulator.instance import DockerInstanceBackend
+
+    subdirectory = "a" * 32
+    handle = InstanceHandle(
+        email="player@example.com",
+        subdirectory=subdirectory,
+        rom_path=tmp_path / "game.gb",
+        container_name="gb-play-" + subdirectory,
+    )
+    backend = DockerInstanceBackend()
+    monkeypatch.setattr(
+        "gb_mcp.emulator.instance._container_running", lambda _name: True
+    )
+
+    def fake_rpc(name, method, path, body, *, timeout):  # noqa: ARG001
+        if path == "/input":
+            return {
+                "email": "instance",
+                "subdirectory": "wrong",
+                "frames_advanced": 4,
+                "classifiers": {"overworld": True},
+                "pngs_b64": [],
+            }
+        if path == "/ping":
+            return {"email": "instance", "alive": True}
+        if path == "/save":
+            return {"email": "instance", "saved": True}
+        if path == "/discard_state":
+            return {"email": "instance", "discarded": True, "restored_state": False}
+        if path == "/status":
+            return {
+                "email": "instance",
+                "running": True,
+                "restored_state": True,
+                "saved": False,
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr("gb_mcp.emulator.instance._rpc", fake_rpc)
+
+    saved = backend.save(handle)
+    assert saved["email"] == "player@example.com"
+    assert saved["saved"] is True
+
+    pinged = backend.ping(handle)
+    assert pinged["email"] == "player@example.com"
+    assert pinged["alive"] is True
+
+    sent = backend.send_input(handle, [{"buttons": ["a"]}], "final")
+    assert sent["email"] == "player@example.com"
+    assert sent["subdirectory"] == subdirectory
+    assert sent["frames_advanced"] == 4
+    assert sent["classifiers"] == {"overworld": True}
+    assert sent["pngs"] == []
+
+    discarded = backend.discard_state(handle)
+    assert discarded["email"] == "player@example.com"
+    assert discarded["discarded"] is True
+
+    status = backend.status(handle)
+    assert status["email"] == "player@example.com"
+    assert status["restored_state"] is True
+    assert status["running"] is True

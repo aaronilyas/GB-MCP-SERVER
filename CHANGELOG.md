@@ -2,9 +2,16 @@
 
 ## [Unreleased] — 2026-09-05
 
+### Play-session LCD, classifiers, hold abort, and email
+
+- Capture copies the composited 160×144 RGB LCD (`pyboy.screen.ndarray` is a live RGBA view, not a raw BG/window layer). After `load_state`, settle is 8× `tick(1, render=True)` with buttons released — PyBoy `tick(n, render=True)` only composes the last frame of a batch, which left interiors that use the GB window with a stale black slab. Capture/until-eval frames still compose with `tick(1, render=True)`. Additive `window_occluded_likely` on `classifiers` is diagnostic only (not `until.classifier`, does not abort input).
+- `battle_likely` is a Gen 1 fight-LCD heuristic: HP-bar-like strips in the enemy/player slots, rejected when `textbox_likely` or `start_menu_likely` is already true. Pallet-like overworld (tree belt vs pavement, fences/ledges) is false. Use `until.classifier=battle_likely` for grass → fight LCD takeover, not for walking, textboxes, or the Start menu.
+- Default `macro=hold` abort is two-gate: full-frame `pixel_delta` > 0.12 **and** (`battle_likely` or `start_menu_likely` became true, or mean luminance jumped by > 80). Camera scroll / 1–3 tile walks do not abort; battle takeover, start menu, and warp fade do. `disable_default_hold_abort=true` and `until.on=none` still force-off.
+- Instance-proxied tool replies that include `email` echo the mapped caller, never the Docker placeholder `"instance"`. The play container may still boot with `email="instance"` internally; the MCP host rewrites on the way out (`save_battery`, `ping_pyboy`, `send_pyboy_input`, `discard_state`, status).
+
 ### Snapshot vs cartridge battery
 
-- `rom.gb.state` is a PyBoy `save_state` snapshot used to resume a session, not cartridge battery. `save_battery` writes that snapshot without stopping; it is not a substitute for `reset_pyboy`. Stop and idle still write the snapshot, then `pyboy.stop(save=True)` flushes cartridge SRAM (`rom.gb.ram`). Live `save_ram` on `save_battery` is optional. A failed `load_state` sets `restore_error`, leaves `restored_state=false`, and cold-boots. A successful restore ticks 8 frames with buttons released before the session is ready.
+- `rom.gb.state` is a PyBoy `save_state` snapshot used to resume a session, not cartridge battery. `save_battery` writes that snapshot without stopping; it is not a substitute for `reset_pyboy`. Stop and idle still write the snapshot, then `pyboy.stop(save=True)` flushes cartridge SRAM (`rom.gb.ram`). Live `save_ram` on `save_battery` is optional. A failed `load_state` sets `restore_error`, leaves `restored_state=false`, and cold-boots. A successful restore ticks 8 frames (`tick(1, render=True)` each) with buttons released before the session is ready.
 - `reset_pyboy(email, subdirectory, discard_state=true, restore_state=false)` stops the instance if any, unlinks `rom.gb.state` when `discard_state` is true, then loads again with `restore_state=false` (cold boot without the previous PyBoy snapshot). Cartridge SRAM is left alone.
 - `load_subdirectory_rom` accepts `restore_state` (default `true`, same resume as today).
 

@@ -52,6 +52,31 @@ def _dialogue_bar(base: tuple[int, int, int] = (80, 160, 80)) -> np.ndarray:
     return frame
 
 
+def _battle() -> np.ndarray:
+    frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+    frame[:72, :, :] = (40, 40, 80)
+    frame[72:, :, :] = (80, 140, 80)
+    frame[18:22, 40:140, :] = (248, 248, 248)
+    frame[100:104, 20:120, :] = (248, 248, 248)
+    return frame
+
+
+def _overworld_field() -> np.ndarray:
+    """Pallet-like grass with an 8×8 checker, tree belt, path, and a house."""
+    frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+    light = (88, 168, 72)
+    dark = (56, 136, 56)
+    for y in range(0, NATIVE_HEIGHT, 8):
+        for x in range(0, NATIVE_WIDTH, 8):
+            color = light if ((x // 8) + (y // 8)) % 2 == 0 else dark
+            frame[y : y + 8, x : x + 8] = color
+    frame[:, 40:56, :] = (24, 72, 24)
+    frame[100:116, :, :] = (176, 144, 72)
+    frame[24:48, 96:120, :] = (160, 48, 48)
+    frame[32:48, 100:116, :] = (200, 180, 120)
+    return frame
+
+
 def _flatten_keys(payload: object, prefix: str = "") -> list[str]:
     keys: list[str] = []
     if isinstance(payload, dict):
@@ -118,16 +143,18 @@ def test_speed_uncapped_batch_is_fast() -> None:
 
 
 def test_hold_default_abort_on_screen_change() -> None:
-    """Case 3: still frame then a very different frame aborts hold; buttons released."""
+    """Case 3: overworld then a battle-layout swap aborts hold; buttons released."""
     from gb_mcp.emulator.input_engine import run_play_input
     from gb_mcp.emulator.vision import ScreenshotPlan, UntilMonitor, capture_native
 
     pyboy = FakePyBoy(Path("dummy.gb"))
+    overworld = _overworld_field()
+    battle = _battle()
 
     def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
         if ticks < 20:
-            return PILImage.fromarray(_solid((32, 160, 32)))
-        return PILImage.fromarray(_solid((200, 16, 16)))
+            return PILImage.fromarray(overworld)
+        return PILImage.fromarray(battle)
 
     pyboy.frame_factory = factory
     play = parse_play_input(
@@ -150,6 +177,42 @@ def test_hold_default_abort_on_screen_change() -> None:
     assert result["stop_reason"] in {"default_hold_abort", "screen_change"}
     assert result["until_fired"] is True
     assert result["frames_advanced"] < 200
+    assert pyboy._pressed == set()
+
+
+def test_hold_default_abort_ignores_overworld_scroll() -> None:
+    """Camera scroll over a Pallet-like field must not default-abort a d-pad hold."""
+    from gb_mcp.emulator.input_engine import run_play_input
+    from gb_mcp.emulator.vision import ScreenshotPlan, UntilMonitor, capture_native
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    field = _overworld_field()
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        return PILImage.fromarray(np.roll(field, int(ticks), axis=0))
+
+    pyboy.frame_factory = factory
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 32,
+            "until_eval_interval": 1,
+            "screenshot_mode": "final",
+        }
+    )
+    assert play.apply_default_hold_abort is True
+    baseline = capture_native(pyboy)
+    result = run_play_input(
+        pyboy,
+        play,
+        capture_native=lambda: capture_native(pyboy),
+        until_monitor=UntilMonitor(play, baseline),
+        screenshot_plan=ScreenshotPlan(),
+    )
+    assert result["stop_reason"] == "max_frames"
+    assert result["until_fired"] is False
+    assert result["frames_advanced"] == 32
     assert pyboy._pressed == set()
 
 
@@ -341,6 +404,7 @@ def test_no_game_state_leakage_allowlist() -> None:
             "textbox_likely": False,
             "battle_likely": False,
             "start_menu_likely": False,
+            "window_occluded_likely": False,
         },
         "screenshot_scale": 4,
         "native_size": [160, 144],
@@ -363,6 +427,7 @@ def test_no_game_state_leakage_allowlist() -> None:
             "textbox_likely",
             "battle_likely",
             "start_menu_likely",
+            "window_occluded_likely",
             "kind",
             "frame_index",
             "step_index",

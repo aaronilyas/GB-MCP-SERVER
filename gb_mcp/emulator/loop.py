@@ -87,6 +87,17 @@ def shape_status(
     return payload
 
 
+def rewrite_host_email(payload: dict[str, Any], host_email: str | None) -> dict[str, Any]:
+    """If ``payload`` has ``email``, set it to the MCP host email, never ``instance``.
+
+    Play containers boot ``EmulatorSession(email="instance")``. Forwarded RPC
+    bodies that include ``email`` must echo the mapped caller instead.
+    """
+    if isinstance(host_email, str) and "email" in payload:
+        payload["email"] = host_email
+    return payload
+
+
 def overlay_status(base: dict[str, Any], remote: dict[str, Any]) -> dict[str, Any]:
     """Copy selected fields from a remote instance status onto a host payload.
 
@@ -96,9 +107,9 @@ def overlay_status(base: dict[str, Any], remote: dict[str, Any]) -> dict[str, An
     for key in REMOTE_STATUS_KEYS:
         if key in remote:
             base[key] = remote[key]
-    if host_email is not None:
-        base["email"] = host_email
-    return base
+    return rewrite_host_email(
+        base, host_email if isinstance(host_email, str) else None
+    )
 
 
 def _default_pyboy_factory(rom_path: Path) -> Any:
@@ -404,7 +415,9 @@ class EmulatorSession:
             self.restored_state = False
             return
         self._release_all_buttons(pyboy)
-        pyboy.tick(POST_RESTORE_SETTLE_FRAMES, render=True)
+        # tick(n, render=True) composes only the last frame of the batch.
+        for _ in range(POST_RESTORE_SETTLE_FRAMES):
+            pyboy.tick(1, render=True)
         self.restored_state = True
 
     def _close_pyboy(self) -> None:

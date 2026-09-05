@@ -747,6 +747,18 @@ def test_save_battery_keeps_session(isolated_db, roms_dir: Path, pyboy_manager) 
     assert images
 
 
+def test_save_battery_echoes_mapped_email(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir, email="player@example.com")
+    loaded = server.load_subdirectory_rom(
+        "player@example.com", name, idle_timeout_seconds=30
+    )
+    assert loaded["email"] == "player@example.com"
+    result = server.save_battery("player@example.com", name)
+    assert result["saved"] is True
+    assert result["email"] == "player@example.com"
+    assert result["email"] != "instance"
+
+
 def test_send_pyboy_input_hold_and_scale(isolated_db, roms_dir: Path, pyboy_manager) -> None:
     from gb_mcp.emulator.play_limits import FORBIDDEN_RESPONSE_KEY_NEEDLES
     from PIL import Image as PILImage

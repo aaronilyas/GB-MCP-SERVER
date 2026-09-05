@@ -18,6 +18,7 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_EMULATION_SPEED,
     DEFAULT_GAP_FRAMES,
     DEFAULT_HASH_REGIONS,
+    DEFAULT_HOLD_ABORT_LUMA_JUMP,
     DEFAULT_HOLD_ABORT_THRESHOLD,
     DEFAULT_MASH_BUTTON,
     DEFAULT_MASH_PRESS_FRAMES,
@@ -85,8 +86,14 @@ class PlayInput:
     until: UntilSpec | None
     until_eval_interval: int
     disable_default_hold_abort: bool
+    # Two-gate default abort for macro=hold (force-off via this flag or until.on=none):
+    # full-frame pixel_delta > default_hold_abort_threshold (0.12) AND
+    # (battle_likely or start_menu_likely became true vs start-of-call, or mean
+    # luminance jumped by more than DEFAULT_HOLD_ABORT_LUMA_JUMP). Camera scroll
+    # and 1–3 tile walks do not abort; battle takeover, start menu, and warp fade do.
     apply_default_hold_abort: bool
     default_hold_abort_threshold: float
+    default_hold_abort_luma_jump: float
     hash_regions: dict[str, tuple[int, int, int, int]]
     ocr: bool
     call_timeout_seconds: float
@@ -549,6 +556,7 @@ def parse_play_input(payload: dict[str, Any], *, session_speed: int | None = Non
         disable_default_hold_abort=disable_default,
         apply_default_hold_abort=apply_default,
         default_hold_abort_threshold=DEFAULT_HOLD_ABORT_THRESHOLD,
+        default_hold_abort_luma_jump=DEFAULT_HOLD_ABORT_LUMA_JUMP,
         hash_regions=hash_regions,
         ocr=ocr,
         call_timeout_seconds=timeout,

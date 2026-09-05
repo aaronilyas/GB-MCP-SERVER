@@ -35,7 +35,7 @@ any appear.
 | idle timeout | **2700 s (45 min)** | **Breaking.** Was 300 s. Env `GB_PYBOY_IDLE_TIMEOUT_SECONDS` still overrides. |
 | `until_eval_interval` | `4` | Range 1–15. |
 | `until.threshold` | `0.08` | Fraction of changed pixels. |
-| default hold abort | **on for `macro=hold`** | Full-screen `pixel_delta_above` vs **start-of-call** frame, threshold **0.12**. Disable with `disable_default_hold_abort=true` or `until.on="none"`. |
+| default hold abort | **on for `macro=hold`** | Two-gate vs **start-of-call** frame: full-screen `pixel_delta` **> 0.12** AND (`battle_likely` or `start_menu_likely` became true, or mean luminance jumped by **> 80**). Overworld camera scroll / 1–3 tile walks do not abort; battle takeover, start menu, and warp fade do. Disable with `disable_default_hold_abort=true` or `until.on="none"`. |
 | `pixel_delta_*` baseline | start-of-call native frame | Not previous-eval-frame. |
 | region hash | blake2s of native RGB bytes, digest_size=8, hex | Computed on the native 160×144 crop, never the upscaled PNG. |
 | `max_frames` / total ticks | 3600 per call | Reject over-budget scripts; do not run away. |
@@ -170,15 +170,27 @@ changed count by region pixel count.
 
 **region hash:** `hashlib.blake2s(contiguous RGB bytes of the crop, digest_size=8).hexdigest()`.
 
-**Classifiers** (coarse, prefer false positives over missing a wild battle):
+**Classifiers** (coarse LCD geometry, not a world model):
 
 - `textbox_likely`: bottom ~48px (`y >= 96`) looks like a Gen 1 dialogue box:
   dark/high-contrast rectangular frame with a lighter inner window.
-- `battle_likely`: large non-overworld layout — two status-ish bars and/or a
-  clear upper-enemy / lower-player split. Over-triggering is OK. Missing a
-  wild-encounter takeover is not. Hold macros also have full-screen delta abort.
+- `battle_likely`: typical Gen 1 fight LCD — enemy status upper, player
+  status lower, two thin HP-bar-like light strips in those slots (and/or a
+  fight menu on that layout). False on overworld walking (tree belt vs
+  pavement, grass with no takeover, fences/ledges), interiors, Start menu,
+  party, and textbox-only frames. Use `until.classifier=battle_likely` to
+  stop on a wild-encounter / fight-LCD takeover (grass → battle screen).
+  Do not use it to interrupt ordinary walking, textbox waits, or the Start
+  menu — those are `textbox_likely` / `start_menu_likely`. A rare false
+  positive is better than missing a real fight; constant overworld trues
+  make the flag useless.
 - `start_menu_likely`: vertical left-hand light/white menu pane (~left 80px
   mostly very light, rest of the screen different).
+- `window_occluded_likely`: diagnostic only (not in `until.classifier`, does
+  not abort input). A large axis-aligned near-black rectangle covers ≥25% of
+  the native LCD while the rest still looks like a room. Full-screen fade-to-
+  black is not a slab; a real Gen 1 textbox (light inner window) is
+  `textbox_likely`, not occluded.
 
 **Screenshot packaging:**
 
@@ -285,13 +297,23 @@ def run_play_input(
 A may define a tiny Protocol; do not import vision types if that creates a
 cycle — accept duck-typed objects.
 
-## Default hold abort (lead decision, B implements)
+## Default hold abort (lead decision)
 
 When `play.apply_default_hold_abort` is true (`macro=hold` and not disabled):
 
 On every until-eval (including interval 4), compute full-screen pixel_delta vs
-the start-of-call frame. If `> 0.12`, stop with `default_hold_abort` unless the
-caller `until` also fires on this same frame (caller wins).
+the start-of-call frame. Abort with `default_hold_abort` only if **both** gates
+pass:
+
+1. `pixel_delta` > 0.12, **and**
+2. `battle_likely` or `start_menu_likely` became true (false on the start-of-call
+   frame, true now), **or** mean luminance jumped by more than 80 (fade-to-black
+   / fade-to-white).
+
+Overworld camera scroll does not abort. Battle takeover, start-menu open, and
+warp fade do. Caller `until` still wins if it fires on the same eval frame.
+
+`disable_default_hold_abort=true` and `until.on="none"` still force-disable.
 
 This is **in addition to** a caller-supplied `until`.
 

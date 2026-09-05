@@ -16,6 +16,8 @@ from PIL import Image
 
 from gb_mcp.emulator.play_limits import (
     DEFAULT_HASH_REGIONS,
+    DEFAULT_HOLD_ABORT_LUMA_JUMP,
+    DEFAULT_HOLD_ABORT_THRESHOLD,
     DEFAULT_REGION,
     DEFAULT_SCREENSHOT_SCALE,
     MAX_SCREENSHOT_ALL,
@@ -37,6 +39,8 @@ _TEXTBOX_CONTRAST_MIN = 80.0
 _BATTLE_SPLIT_MIN = 25.0
 _BAR_ROW_LUM_MIN = 190.0
 _BAR_MIN_WIDTH_FRAC = 0.35
+# Full-width fence/ledge rows are not HP bars (bars sit in a status slot).
+_BAR_MAX_WIDTH_FRAC = 0.90
 _BAR_THICKNESS = (2, 10)
 _MENU_X1 = 80
 _MENU_LIGHT_MIN = 200.0
@@ -44,6 +48,14 @@ _MENU_LIGHT_FRAC = 0.55
 _MENU_HEIGHT_FRAC = 0.70
 _MENU_ROW_LIGHT_FRAC = 0.60
 _MENU_PANE_DELTA = 40.0
+
+# Stale GB window: a large near-black rectangle while the rest still looks like a room.
+_OCCLUDE_BLACK_LUM = 24.0
+_OCCLUDE_FILL_FRAC = 0.90
+_OCCLUDE_MIN_AREA_FRAC = 0.25
+_OCCLUDE_FADE_FRAC = 0.88
+_OCCLUDE_ROOM_STD_MIN = 6.0
+_OCCLUDE_ROOM_BLACK_MAX = 0.40
 
 
 def _as_rgb(frame: Any) -> np.ndarray:
@@ -84,15 +96,19 @@ def _crop(rgb: np.ndarray, box: tuple[int, int, int, int]) -> np.ndarray:
 
 
 def capture_native(pyboy: Any) -> np.ndarray:
-    """Return the current LCD as contiguous (144, 160, 3) uint8 RGB."""
+    """Copy the composited LCD as contiguous (144, 160, 3) uint8 RGB.
+
+    ``screen.ndarray`` is a view of PyBoy's RGBA ``_screenbuffer``, not a raw
+    BG/window layer. ``screen.image`` can alias the same buffer.
+    """
     screen = getattr(pyboy, "screen", None)
     if screen is None:
         raise RuntimeError("PyBoy screen is unavailable")
-    frame: np.ndarray | None = None
+    frame: Any = None
     raw = getattr(screen, "ndarray", None)
     if raw is not None:
         try:
-            candidate = np.asarray(raw)
+            candidate = np.array(np.asarray(raw), copy=True, order="C")
             if getattr(candidate, "ndim", 0) >= 2:
                 frame = candidate
         except Exception:
@@ -101,9 +117,11 @@ def capture_native(pyboy: Any) -> np.ndarray:
         image = getattr(screen, "image", None)
         if image is None:
             raise RuntimeError("PyBoy screen image is unavailable")
-        frame = np.asarray(image)
-    rgb = np.array(_as_rgb(frame), dtype=np.uint8, copy=True, order="C")
-    return rgb
+        if isinstance(image, Image.Image):
+            frame = image.copy()
+        else:
+            frame = np.array(np.asarray(image), copy=True, order="C")
+    return np.array(_as_rgb(frame), dtype=np.uint8, copy=True, order="C")
 
 
 def scale_nearest(frame: Any, scale: int) -> Image.Image:
@@ -176,11 +194,11 @@ def _textbox_likely(rgb: np.ndarray) -> bool:
 
 
 def _light_horizontal_strips(lum: np.ndarray) -> list[tuple[int, int]]:
-    """Thin bright status-bar-like row runs (height 2–10)."""
+    """Thin bright status-bar-like row runs (height 2–10, not full-width)."""
     if lum.size == 0:
         return []
     row_frac = (lum >= _BAR_ROW_LUM_MIN).mean(axis=1)
-    is_bar = row_frac >= _BAR_MIN_WIDTH_FRAC
+    is_bar = (row_frac >= _BAR_MIN_WIDTH_FRAC) & (row_frac <= _BAR_MAX_WIDTH_FRAC)
     strips: list[tuple[int, int]] = []
     start: int | None = None
     for index, flag in enumerate(is_bar.tolist()):
@@ -195,8 +213,16 @@ def _light_horizontal_strips(lum: np.ndarray) -> list[tuple[int, int]]:
     return [item for item in strips if lo <= item[1] <= hi]
 
 
+def _strip_in_band(strips: list[tuple[int, int]], y0: int, y1: int) -> bool:
+    """True if a light strip is centered in [y0, y1)."""
+    return any(y0 <= start + thickness // 2 < y1 for start, thickness in strips)
+
+
 def _battle_likely(rgb: np.ndarray) -> bool:
-    """Split upper/lower layout and/or two light status bars. Over-trigger OK."""
+    """Gen 1 fight LCD: HP-bar strips in enemy/player slots, not overworld."""
+    # textbox/start-menu helpers must not call back into _battle_likely.
+    if _textbox_likely(rgb) or _start_menu_likely(rgb):
+        return False
     lum = _luminance(rgb)
     height = lum.shape[0]
     third = max(1, height // 3)
@@ -204,9 +230,20 @@ def _battle_likely(rgb: np.ndarray) -> bool:
     bot_mean = rgb[-third:].reshape(-1, 3).mean(axis=0)
     split = float(np.abs(top_mean - bot_mean).mean())
     strips = _light_horizontal_strips(lum)
-    if split > _BATTLE_SPLIT_MIN and len(strips) >= 1:
+    # Enemy HUD ~y=0–48, player HUD ~y=72–120 on 160×144; scale with height.
+    enemy_hi = third
+    player_lo = height // 2
+    player_hi = height * 5 // 6
+    slotted = _strip_in_band(strips, 0, enemy_hi) and _strip_in_band(
+        strips, player_lo, player_hi
+    )
+    # Position first: grass fight LCDs still hit even with a modest split.
+    if slotted:
         return True
-    return len(strips) >= 2
+    if len(strips) < 2 or split <= _BATTLE_SPLIT_MIN:
+        return False
+    centers = sorted(start + thickness / 2.0 for start, thickness in strips)
+    return float(centers[-1] - centers[0]) >= float(third)
 
 
 def _start_menu_likely(rgb: np.ndarray) -> bool:
@@ -226,12 +263,92 @@ def _start_menu_likely(rgb: np.ndarray) -> bool:
     return True
 
 
+def _largest_near_black_rect(
+    black: np.ndarray, fill: float
+) -> tuple[int, int, int, int] | None:
+    """Largest axis-aligned near-black rect flush with an edge or the bottom-right."""
+    height, width = black.shape
+    integ = np.zeros((height + 1, width + 1), dtype=np.float64)
+    integ[1:, 1:] = np.cumsum(np.cumsum(black.astype(np.float64), axis=0), axis=1)
+
+    def rect_fill(y0: int, y1: int, x0: int, x1: int) -> float:
+        area = (y1 - y0) * (x1 - x0)
+        if area <= 0:
+            return 0.0
+        total = integ[y1, x1] - integ[y0, x1] - integ[y1, x0] + integ[y0, x0]
+        return float(total / area)
+
+    best_box: tuple[int, int, int, int] | None = None
+    best_area = 0
+
+    def take(y0: int, y1: int, x0: int, x1: int) -> None:
+        nonlocal best_box, best_area
+        area = (y1 - y0) * (x1 - x0)
+        if area <= best_area:
+            return
+        if rect_fill(y0, y1, x0, x1) < fill:
+            return
+        best_area = area
+        best_box = (y0, y1, x0, x1)
+
+    for y1 in range(1, height + 1):
+        take(0, y1, 0, width)
+    for y0 in range(height):
+        take(y0, height, 0, width)
+    for x1 in range(1, width + 1):
+        take(0, height, 0, x1)
+    for x0 in range(width):
+        take(0, height, x0, width)
+    # GB window is always the bottom-right from (WX-7, WY).
+    for y0 in range(height):
+        remain_h = height - y0
+        if remain_h * width <= best_area:
+            break
+        for x0 in range(width):
+            if remain_h * (width - x0) <= best_area:
+                break
+            take(y0, height, x0, width)
+    return best_box
+
+
+def _window_occluded_likely(rgb: np.ndarray) -> bool:
+    """Stale window slab: large near-black rectangle, rest still looks like a room."""
+    if rgb.ndim != 3 or rgb.shape[0] < 1 or rgb.shape[1] < 1:
+        return False
+    lum = _luminance(rgb)
+    black = lum <= _OCCLUDE_BLACK_LUM
+    black_frac = float(black.mean())
+    if black_frac >= _OCCLUDE_FADE_FRAC:
+        return False
+    if black_frac < _OCCLUDE_MIN_AREA_FRAC * _OCCLUDE_FILL_FRAC:
+        return False
+    box = _largest_near_black_rect(black, _OCCLUDE_FILL_FRAC)
+    if box is None:
+        return False
+    y0, y1, x0, x1 = box
+    height, width = lum.shape
+    area = (y1 - y0) * (x1 - x0)
+    if area / float(height * width) < _OCCLUDE_MIN_AREA_FRAC:
+        return False
+    rest_mask = np.ones((height, width), dtype=bool)
+    rest_mask[y0:y1, x0:x1] = False
+    rest = lum[rest_mask]
+    if rest.size == 0:
+        return False
+    if float((rest <= _OCCLUDE_BLACK_LUM).mean()) > _OCCLUDE_ROOM_BLACK_MAX:
+        return False
+    if float(rest.std()) < _OCCLUDE_ROOM_STD_MIN:
+        return False
+    return True
+
+
 def classify(frame: Any) -> dict[str, bool]:
     rgb = _as_rgb(frame)
     return {
         "textbox_likely": _textbox_likely(rgb),
         "battle_likely": _battle_likely(rgb),
         "start_menu_likely": _start_menu_likely(rgb),
+        "window_occluded_likely": _window_occluded_likely(rgb),
     }
 
 
@@ -249,10 +366,12 @@ class UntilMonitor:
         self._stable_streak = 0
         self._classifier_seen_true = False
         self._disappear_met_at_baseline = False
+        self._baseline_classifiers = classify(self.baseline_frame)
+        self._baseline_luma = float(_luminance(self.baseline_frame).mean())
         until = getattr(play, "until", None)
         classifier = getattr(until, "classifier", None) if until is not None else None
         if until is not None and until.on == "classifier" and classifier:
-            present = bool(classify(self.baseline_frame).get(classifier))
+            present = bool(self._baseline_classifiers.get(classifier))
             self._classifier_seen_true = present
             if until.classifier_polarity == "disappears" and not present:
                 self._disappear_met_at_baseline = True
@@ -271,10 +390,26 @@ class UntilMonitor:
         if not getattr(self.play, "apply_default_hold_abort", False):
             return None
         threshold = float(
-            getattr(self.play, "default_hold_abort_threshold", 0.12)
+            getattr(self.play, "default_hold_abort_threshold", DEFAULT_HOLD_ABORT_THRESHOLD)
         )
         delta = pixel_delta_fraction(self.baseline_frame, frame, DEFAULT_REGION)
-        if delta > threshold:
+        if delta <= threshold:
+            return None
+        # Second gate: battle/menu appearance or a fade-sized luma jump, not camera scroll.
+        current = classify(frame)
+        battle_became = (not self._baseline_classifiers.get("battle_likely")) and bool(
+            current.get("battle_likely")
+        )
+        menu_became = (not self._baseline_classifiers.get("start_menu_likely")) and bool(
+            current.get("start_menu_likely")
+        )
+        if battle_became or menu_became:
+            return StopDecision("default_hold_abort", True)
+        luma_limit = float(
+            getattr(self.play, "default_hold_abort_luma_jump", DEFAULT_HOLD_ABORT_LUMA_JUMP)
+        )
+        luma_jump = abs(float(_luminance(frame).mean()) - self._baseline_luma)
+        if luma_jump > luma_limit:
             return StopDecision("default_hold_abort", True)
         return None
 
@@ -428,6 +563,7 @@ class ScreenshotPlan:
                 "textbox_likely": False,
                 "battle_likely": False,
                 "start_menu_likely": False,
+                "window_occluded_likely": False,
             }
         else:
             hashes = hash_named_regions(final_native, regions)

@@ -60,38 +60,148 @@ def _start_menu(base: tuple[int, int, int] = (80, 160, 80)) -> np.ndarray:
     return frame
 
 
+def _pallet_like_overworld() -> np.ndarray:
+    """Mid-green field, darker tree belt, lighter pavement, thin ledges."""
+    frame = _solid((80, 160, 80))
+    frame[:40, :, :] = (24, 72, 24)
+    frame[96:, :, :] = (176, 176, 152)
+    frame[64:68, :, :] = (220, 220, 200)
+    frame[80:83, :, :] = (210, 210, 190)
+    return frame
+
+
+def _route_like_grass() -> np.ndarray:
+    """Two similar greens and no HP-bar strips."""
+    frame = _solid((70, 150, 70))
+    frame[72:, :, :] = (90, 170, 90)
+    return frame
+
+
+def _interior_floor() -> np.ndarray:
+    return _solid((140, 100, 56))
+
+
+def _room() -> np.ndarray:
+    """Non-uniform interior-like playfield (checker floor + furniture)."""
+    frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+    rows, cols = np.indices((NATIVE_HEIGHT, NATIVE_WIDTH))
+    checker = ((cols // 8) + (rows // 8)) % 2 == 0
+    frame[checker] = (80, 160, 80)
+    frame[~checker] = (48, 112, 48)
+    frame[32:96, 24:136] = (140, 88, 40)
+    frame[16:40, 16:56] = (200, 160, 80)
+    return frame
+
+
+def _stale_window_slab(kind: str) -> np.ndarray:
+    frame = _room()
+    if kind == "bottom":
+        frame[96:, :, :] = (4, 4, 4)
+    elif kind == "top":
+        frame[:72, :, :] = (4, 4, 4)
+    elif kind == "right":
+        frame[:, 80:, :] = (4, 4, 4)
+    else:
+        raise ValueError(kind)
+    return frame
+
+
+def _fade_black() -> np.ndarray:
+    return _solid((0, 0, 0))
+
+
+def _overworld_field() -> np.ndarray:
+    """Pallet-like grass with an 8×8 checker, tree belt, path, and a house."""
+    frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+    light = (88, 168, 72)
+    dark = (56, 136, 56)
+    for y in range(0, NATIVE_HEIGHT, 8):
+        for x in range(0, NATIVE_WIDTH, 8):
+            color = light if ((x // 8) + (y // 8)) % 2 == 0 else dark
+            frame[y : y + 8, x : x + 8] = color
+    frame[:, 40:56, :] = (24, 72, 24)
+    frame[100:116, :, :] = (176, 144, 72)
+    frame[24:48, 96:120, :] = (160, 48, 48)
+    frame[32:48, 100:116, :] = (200, 180, 120)
+    return frame
+
+
+def _hold_play(**extra: object):
+    payload: dict = {"macro": "hold", "buttons": ["up"], "max_frames": 200}
+    payload.update(extra)
+    return parse_play_input(payload)
+
+
 def test_textbox_and_pixel_delta_on_dialogue_bar() -> None:
     green = _solid((32, 200, 32))
     dialogue = _dialogue_bar((32, 200, 32))
     assert classify(green)["textbox_likely"] is False
     assert classify(dialogue)["textbox_likely"] is True
+    assert classify(dialogue)["battle_likely"] is False
     assert pixel_delta_fraction(green, dialogue, DEFAULT_REGION) > 0.08
 
 
 def test_until_monitor_default_hold_abort() -> None:
-    play = parse_play_input(
-        {"macro": "hold", "buttons": ["up"], "max_frames": 200}
-    )
+    play = _hold_play()
     assert play.apply_default_hold_abort is True
-    monitor = UntilMonitor(play, _solid((32, 200, 32)))
-    decision = monitor.evaluate(_solid((200, 16, 16)), 0)
+    overworld = _overworld_field()
+    monitor = UntilMonitor(play, overworld)
+    decision = monitor.evaluate(_battle(), 0)
     assert decision is not None
     assert decision.reason == "default_hold_abort"
     assert decision.until_fired is True
 
 
+def test_until_monitor_default_hold_abort_on_fade() -> None:
+    play = _hold_play()
+    overworld = _overworld_field()
+    monitor = UntilMonitor(play, overworld)
+    black = monitor.evaluate(_solid((0, 0, 0)), 0)
+    assert black is not None
+    assert black.reason == "default_hold_abort"
+    white = UntilMonitor(play, overworld).evaluate(_solid((255, 255, 255)), 0)
+    assert white is not None
+    assert white.reason == "default_hold_abort"
+
+
+def test_until_monitor_default_hold_abort_ignores_overworld_scroll() -> None:
+    play = _hold_play()
+    base = _overworld_field()
+    monitor = UntilMonitor(play, base)
+    scrolled = np.roll(base, 8, axis=0)
+    assert pixel_delta_fraction(base, scrolled, DEFAULT_REGION) > 0.12
+    assert classify(base)["battle_likely"] is False
+    assert classify(scrolled)["battle_likely"] is False
+    for shift in range(1, 33):
+        frame = np.roll(base, shift, axis=0)
+        assert monitor.evaluate(frame, shift) is None
+
+
+def test_until_monitor_default_hold_abort_on_start_menu() -> None:
+    play = _hold_play()
+    overworld = _overworld_field()
+    assert classify(overworld)["start_menu_likely"] is False
+    menu = _start_menu()
+    assert classify(menu)["start_menu_likely"] is True
+    decision = UntilMonitor(play, overworld).evaluate(menu, 0)
+    assert decision is not None
+    assert decision.reason == "default_hold_abort"
+
+
+def test_until_monitor_disable_default_hold_abort() -> None:
+    play = _hold_play(disable_default_hold_abort=True)
+    assert play.apply_default_hold_abort is False
+    monitor = UntilMonitor(play, _overworld_field())
+    assert monitor.evaluate(_battle(), 0) is None
+    assert monitor.evaluate(_solid((0, 0, 0)), 0) is None
+    assert monitor.evaluate(_start_menu(), 0) is None
+
+
 def test_until_monitor_caller_until_wins_over_default_abort() -> None:
-    play = parse_play_input(
-        {
-            "macro": "hold",
-            "buttons": ["up"],
-            "max_frames": 200,
-            "until": {"on": "pixel_delta_above", "threshold": 0.08},
-        }
-    )
+    play = _hold_play(until={"on": "pixel_delta_above", "threshold": 0.08})
     assert play.apply_default_hold_abort is True
-    monitor = UntilMonitor(play, _solid((32, 200, 32)))
-    decision = monitor.evaluate(_solid((200, 16, 16)), 0)
+    monitor = UntilMonitor(play, _overworld_field())
+    decision = monitor.evaluate(_battle(), 0)
     assert decision is not None
     assert decision.reason == "screen_change"
     assert decision.until_fired is True
@@ -188,26 +298,32 @@ def test_screenshot_plan_interrupt_and_final_same_frame() -> None:
 
 
 def test_battle_classifier_split_layout() -> None:
-    overworld = _solid((80, 160, 80))
-    assert classify(_battle())["battle_likely"] is True
-    assert classify(overworld)["battle_likely"] is False
+    battle = classify(_battle())
+    assert battle["battle_likely"] is True
+    assert battle["textbox_likely"] is False
+    assert battle["start_menu_likely"] is False
+    assert classify(_solid((80, 160, 80)))["battle_likely"] is False
+    assert classify(_pallet_like_overworld())["battle_likely"] is False
+    assert classify(_route_like_grass())["battle_likely"] is False
+    assert classify(_interior_floor())["battle_likely"] is False
 
 
 def test_start_menu_classifier_left_pane() -> None:
-    assert classify(_start_menu())["start_menu_likely"] is True
+    flags = classify(_start_menu())
+    assert flags["start_menu_likely"] is True
+    assert flags["battle_likely"] is False
     assert classify(_solid((80, 160, 80)))["start_menu_likely"] is False
 
 
 def test_capture_native_drops_alpha_and_falls_back_to_image() -> None:
     class _NdarrayScreen:
-        @property
-        def ndarray(self) -> np.ndarray:
+        def __init__(self) -> None:
             rgba = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 4), dtype=np.uint8)
             rgba[..., 0] = 1
             rgba[..., 1] = 2
             rgba[..., 2] = 3
             rgba[..., 3] = 255
-            return rgba
+            self.ndarray = rgba
 
     class _ImageScreen:
         ndarray = None
@@ -217,11 +333,69 @@ def test_capture_native_drops_alpha_and_falls_back_to_image() -> None:
         def __init__(self, screen: object) -> None:
             self.screen = screen
 
-    from_nd = capture_native(_PyBoy(_NdarrayScreen()))
+    nd_screen = _NdarrayScreen()
+    from_nd = capture_native(_PyBoy(nd_screen))
     assert from_nd.shape == (NATIVE_HEIGHT, NATIVE_WIDTH, 3)
     assert from_nd.dtype == np.uint8
+    assert from_nd.flags["C_CONTIGUOUS"]
+    assert tuple(from_nd[0, 0]) == (1, 2, 3)
+    nd_screen.ndarray[..., :3] = 99
     assert tuple(from_nd[0, 0]) == (1, 2, 3)
 
     from_im = capture_native(_PyBoy(_ImageScreen()))
     assert from_im.shape == (NATIVE_HEIGHT, NATIVE_WIDTH, 3)
+    assert from_im.flags["C_CONTIGUOUS"]
     assert tuple(from_im[0, 0]) == (9, 8, 7)
+
+    class _AliasedImageScreen:
+        ndarray = None
+
+        def __init__(self) -> None:
+            self.buf = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 4), dtype=np.uint8)
+            self.buf[..., 0] = 9
+            self.buf[..., 1] = 8
+            self.buf[..., 2] = 7
+            self.buf[..., 3] = 255
+            self.image = PILImage.frombuffer(
+                "RGBA",
+                (NATIVE_WIDTH, NATIVE_HEIGHT),
+                self.buf,
+                "raw",
+                "RGBA",
+                0,
+                1,
+            )
+
+    aliased = _AliasedImageScreen()
+    from_alias = capture_native(_PyBoy(aliased))
+    assert from_alias.shape == (NATIVE_HEIGHT, NATIVE_WIDTH, 3)
+    assert from_alias.flags["C_CONTIGUOUS"]
+    assert tuple(from_alias[0, 0]) == (9, 8, 7)
+    aliased.buf[..., :3] = 1
+    assert tuple(from_alias[0, 0]) == (9, 8, 7)
+
+
+def test_window_occluded_slab_not_textbox_or_fade() -> None:
+    overworld = _room()
+    dialogue = _dialogue_bar((80, 160, 80))
+    fade = _fade_black()
+    bottom = _stale_window_slab("bottom")
+    top = _stale_window_slab("top")
+    right = _stale_window_slab("right")
+
+    ow = classify(overworld)
+    assert ow["window_occluded_likely"] is False
+    assert ow["textbox_likely"] is False
+
+    box = classify(dialogue)
+    assert box["textbox_likely"] is True
+    assert box["window_occluded_likely"] is False
+
+    faded = classify(fade)
+    assert faded["window_occluded_likely"] is False
+    assert faded["textbox_likely"] is False
+
+    for slab in (bottom, top, right):
+        flags = classify(slab)
+        assert flags["window_occluded_likely"] is True
+        assert flags["textbox_likely"] is False
