@@ -44,9 +44,11 @@ Play is **not** in-process. `load_subdirectory_rom` starts or reuses
 `gb-play-<subdir hex>`, mounting only that subdirectory (ROM read-only, `.state`
 read-write). `send_pyboy_input` talks to that container through
 `gb_mcp/emulator` and still returns MCP PNG images. `save_battery` writes the
-cartridge save without stopping. `stop_pyboy` and idle timeout write the save
-to the volume, then remove the container. The next load starts a new container
-and restores `roms/<subdir>/<rom>.state`.
+PyBoy snapshot (`rom.gb.state`) without stopping. It is not a substitute for
+`reset_pyboy`. `stop_pyboy` and idle timeout write that snapshot, then
+`pyboy.stop(save=True)` flushes cartridge SRAM (`rom.gb.ram`) and removes the
+container. Live `save_ram` on `save_battery` is optional. The next load starts
+a new container and restores `roms/<subdir>/<rom>.state`.
 
 One live session per email. Switching games saves and stops the old instance,
 then starts the new one. A dead instance returns a short tool error, not a
@@ -69,8 +71,11 @@ Docker dump.
 | `reset_pyboy` | Stop if running, optionally drop `rom.gb.state`, cold boot without the previous PyBoy snapshot |
 | `send_pyboy_input` | Buttons, steps, macros, optional framebuffer `until`; returns PNG screenshot(s) at scale 4 |
 | `ping_pyboy` | Reset the idle timer without advancing emulation or pressing buttons |
-| `save_battery` | Write the cartridge save without stopping PyBoy |
+| `save_battery` | Write the PyBoy snapshot (`rom.gb.state`) without stopping; not a substitute for `reset_pyboy` |
 | `stop_pyboy` | Save, then remove the instance container |
+
+`load_subdirectory_rom` on an already-running session returns `already_running`
+and ignores `restore_state`. Cold boot is `reset_pyboy`.
 
 Play is screenshot-only: there is no memory or game-state tool. `until` and
 classifiers are derived from the native 160×144 LCD. Default
@@ -207,11 +212,13 @@ Volumes (survive MCP restart and instance `rm`):
 directory, not `/app/roms` inside the MCP container.
 
 Save files live next to the ROM (`roms/<32-hex>/<name>.gb.state`). Stopping or
-idling removes `gb-play-<32-hex>`; the `.state` file stays on the volume. The
-next `load_subdirectory_rom` starts a new container and restores it
-(`restore_state` default true). `reset_pyboy` stops that instance if any,
-unlinks the snapshot when `discard_state` is true, and cold-boots without the
-previous PyBoy snapshot. Cartridge SRAM (`*.gb.ram`) is left alone.
+idling writes that PyBoy snapshot, then `pyboy.stop(save=True)` flushes
+cartridge SRAM (`*.gb.ram`) and removes `gb-play-<32-hex>`. The `.state` file
+stays on the volume. The next `load_subdirectory_rom` starts a new container
+and restores it (`restore_state` default true). `reset_pyboy` stops that
+instance if any, unlinks the snapshot when `discard_state` is true, and
+cold-boots without the previous PyBoy snapshot. Cartridge SRAM is left alone
+on reset. Live `save_ram` on `save_battery` is optional.
 
 ## Local stdio
 

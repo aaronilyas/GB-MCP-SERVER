@@ -1,8 +1,4 @@
-"""Integration skeleton for the screenshot-only play loop (AGENT_CONTRACT).
-
-These tests are expected to fail until sub-agents A/B/C land and the lead
-wires `_apply_input`. They encode the 12 acceptance cases.
-"""
+"""Integration tests for the screenshot-only play loop (AGENT_CONTRACT)."""
 
 from __future__ import annotations
 

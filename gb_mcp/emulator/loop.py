@@ -19,11 +19,8 @@ from gb_mcp import config
 from gb_mcp.emulator.play_limits import (
     BUTTONS,
     DEFAULT_EMULATION_SPEED,
-    INPUT_COMMAND_TIMEOUT_SECONDS,
-    MAX_HOLD_FRAMES,
-    MAX_INPUT_STEPS,
-    SCREENSHOT_MODES,
 )
+
 PyBoyFactory = Callable[[Path], Any]
 REMOTE_STATUS_KEYS = (
     "restored_state",

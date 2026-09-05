@@ -11,7 +11,7 @@ import db
 import server
 from gb_mcp import config
 from gb_mcp.emulator import session as pyboy_sessions
-from gb_mcp.emulator.session import MAX_HOLD_FRAMES, MAX_INPUT_STEPS
+from gb_mcp.emulator.play_limits import MAX_HOLD_FRAMES, MAX_INPUT_STEPS
 from gb_mcp.http import oauth_token_claims
 from gb_mcp.storage.roms import _state_path_for_rom
 

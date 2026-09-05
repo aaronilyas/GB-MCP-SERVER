@@ -4,6 +4,14 @@ Landed on `main` in `571331c` (2026-09-04). Target: an LLM can play Pallet Town
 → Brock in ≤75 minutes wall-clock on average using screenshots only, with
 roughly 80–150 decision turns.
 
+## Later play fixes (2026-09-05)
+
+- `reset_pyboy` with `discard_state=true` unlinks the PyBoy snapshot and cold-boots.
+  `.state` is not cartridge battery.
+- A successful `load_state` ticks **8 settle frames** with buttons released.
+- Intermediate `tick(n, render=False)` is **capped at 4**; a new button chord
+  renders before any `render=False` batch.
+
 ## How to call the new `send_pyboy_input` macros
 
 Old callers still work: `buttons` + `hold_frames` + `screenshot_mode=final`.
@@ -13,7 +21,9 @@ Breaking default changes:
 - screenshots are **4× nearest-neighbor** (was native 160×144)
 - idle timeout is **45 minutes** (was 5 minutes)
 
-### Walk north until the screen changes
+### Walk one tile north
+
+Prefer one-tile steps. Do not hold a d-pad for 3600 frames across a door.
 
 ```json
 {
@@ -21,16 +31,17 @@ Breaking default changes:
   "subdirectory": "<32-hex>",
   "macro": "hold",
   "buttons": ["up"],
-  "max_frames": 3600,
+  "hold_frames": 16,
+  "gap_frames": 12,
   "emulation_speed": 0,
-  "screenshot_mode": "interrupt_and_final",
-  "screenshot_scale": 4,
-  "until": {
-    "on": "pixel_delta_above",
-    "threshold": 0.08
-  }
+  "screenshot_mode": "final",
+  "screenshot_scale": 4
 }
 ```
+
+`gap_frames` may be 8–16. If stairs do nothing or the camera scrolls out of
+bounds, call `reset_pyboy` with `discard_state=true` and start a new game; do
+not keep restoring a poisoned `.state`.
 
 If `until` is omitted, a **default hold abort** still fires on full-screen
 `pixel_delta_above` with threshold **0.12** versus the **start-of-call** native

@@ -12,6 +12,7 @@ from typing import Any
 
 import db
 from gb_mcp import config
+from gb_mcp.emulator.loop import _state_path_for_rom as _state_path_for_rom
 from gb_mcp.gb.constants import ROM_SUFFIXES
 from gb_mcp.gb.header import _read_rom_identity, assert_rom_playable
 
@@ -90,11 +91,6 @@ def _isoformat(value: datetime | None) -> str | None:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.isoformat()
-
-
-def _state_path_for_rom(rom_path: Path) -> Path:
-    """Return the PyBoy save-state path stored next to the ROM (`rom.gb.state`)."""
-    return Path(str(rom_path) + ".state")
 
 
 def _rom_in_subdirectory(name: str) -> Path:

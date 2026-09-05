@@ -4,7 +4,7 @@
 
 ### Snapshot vs cartridge battery
 
-- `rom.gb.state` is a PyBoy `save_state` snapshot used to resume a session, not cartridge battery. Stop and idle still write that snapshot, then `pyboy.stop(save=True)` flushes SRAM (`rom.gb.ram`). `save_battery` cannot dump SRAM without stopping: PyBoy's public battery API is `stop(save=True)`. A failed `load_state` sets `restore_error`, leaves `restored_state=false`, and cold-boots. A successful restore ticks 8 frames with buttons released before the session is ready.
+- `rom.gb.state` is a PyBoy `save_state` snapshot used to resume a session, not cartridge battery. `save_battery` writes that snapshot without stopping; it is not a substitute for `reset_pyboy`. Stop and idle still write the snapshot, then `pyboy.stop(save=True)` flushes cartridge SRAM (`rom.gb.ram`). Live `save_ram` on `save_battery` is optional. A failed `load_state` sets `restore_error`, leaves `restored_state=false`, and cold-boots. A successful restore ticks 8 frames with buttons released before the session is ready.
 - `reset_pyboy(email, subdirectory, discard_state=true, restore_state=false)` stops the instance if any, unlinks `rom.gb.state` when `discard_state` is true, then loads again with `restore_state=false` (cold boot without the previous PyBoy snapshot). Cartridge SRAM is left alone.
 - `load_subdirectory_rom` accepts `restore_state` (default `true`, same resume as today).
 
@@ -15,7 +15,7 @@
 ### Screenshot-only play loop
 
 - `send_pyboy_input` accepts macros (`hold`, `mash`, `steps`, `buttons`), `until` framebuffer interrupts, wait steps, `gap_frames`, screenshot modes `interrupt_and_final` / `keyframes`, `screenshot_scale` 1–4 (default 4), and uncapped `emulation_speed` (default 0). Caps: 500 steps, `hold_frames` 1–3600. There is no memory or game-state tool; `until` is screenshot-derived on the native 160×144 LCD.
-- Idle timeout is 45 minutes (`GB_PYBOY_IDLE_TIMEOUT_SECONDS`, default 2700). `ping_pyboy` resets the idle timer without advancing emulation. `save_battery` writes the cartridge save without stopping PyBoy.
+- Idle timeout is 45 minutes (`GB_PYBOY_IDLE_TIMEOUT_SECONDS`, default 2700). `ping_pyboy` resets the idle timer without advancing emulation.
 - `load_subdirectory_rom` accepts `emulation_speed` and `idle_timeout_seconds`. `submit_gb_rom` accepts `boot=true` to start PyBoy after a mapped submit.
 
 ### Size-strict ROM validation and chunked uploads

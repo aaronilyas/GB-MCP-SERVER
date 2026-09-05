@@ -106,8 +106,10 @@ mcp = MCPServer(
         "game-state tool — until and classifiers are screenshot-derived from the "
         "native 160x144 LCD. Keep the session alive with ping_pyboy if you will "
         "think longer than about 30 seconds (does not advance emulation or press "
-        "buttons). Write the cartridge save without stopping via save_battery; "
-        "stop with stop_pyboy. Forty-five minutes without send_pyboy_input or "
+        "buttons). Write the PyBoy snapshot (rom.gb.state) without stopping via "
+        "save_battery (not a substitute for reset_pyboy). Cartridge SRAM "
+        "(rom.gb.ram) is flushed on stop/idle via stop(save=True). "
+        "Stop with stop_pyboy. Forty-five minutes without send_pyboy_input or "
         "ping_pyboy auto-saves the game and closes PyBoy. Read-only resources "
         "expose the owned ROM list, cartridge header metadata, and live PyBoy "
         "session status for an email. A full how-to is at the gb://usage "
@@ -1770,11 +1772,13 @@ def ping_pyboy(
 @mcp.tool(
     name="save_battery",
     description=(
-        "Write the cartridge battery/save for a running PyBoy session without "
-        "stopping PyBoy. The 32-character subdirectory name is required. Email "
-        "may be omitted when the OAuth access token has an email or sub claim. "
-        "Returns saved: true. stop_pyboy still "
-        "saves then stops. Idle timeout also saves then closes."
+        "Write the PyBoy snapshot (rom.gb.state) for a running session without "
+        "stopping. That file is save_state output for resume, not cartridge "
+        "battery. It is not a substitute for reset_pyboy. The 32-character "
+        "subdirectory name is required. Email may be omitted when the OAuth "
+        "access token has an email or sub claim. Returns saved: true. "
+        "stop_pyboy and idle timeout write the snapshot, then stop(save=True) "
+        "flushes cartridge SRAM (rom.gb.ram). Live save_ram is optional."
     ),
 )
 def save_battery(
@@ -1794,7 +1798,7 @@ def save_battery(
         ),
     ] = "",
 ) -> dict[str, Any]:
-    """Write cartridge save state and leave PyBoy running."""
+    """Write the PyBoy snapshot (rom.gb.state) and leave PyBoy running."""
     resolved = _resolve_owned_session(email, subdirectory, saved=False)
     if isinstance(resolved, dict):
         return resolved
@@ -1817,8 +1821,9 @@ def save_battery(
         "Stop a running PyBoy session. The 32-character subdirectory name is "
         "required. Email may be omitted when the OAuth access token has an "
         "email or sub claim. The game is saved "
-        "before PyBoy closes. Use save_battery to write the save without "
-        "stopping. Use this instead of waiting for the 45-minute idle "
+        "before PyBoy closes (snapshot, then stop(save=True) for SRAM). Use "
+        "save_battery to write the PyBoy snapshot without stopping. Use this "
+        "instead of waiting for the 45-minute idle "
         "auto-save."
     ),
 )
@@ -2002,9 +2007,11 @@ longer than about 30 seconds. Returns `alive`, `idle_timeout_seconds`,
 ### 7. save_battery
 
 `subdirectory` is required. `email` may be omitted when the OAuth access
-token has an email or sub claim. Writes the cartridge
-battery/save and leaves PyBoy running. Returns `saved: true`. `stop_pyboy`
-still saves then stops.
+token has an email or sub claim. Writes the PyBoy snapshot
+(`rom.gb.state`) and leaves PyBoy running. That file is not cartridge
+battery. It is not a substitute for `reset_pyboy`. Returns `saved: true`.
+`stop_pyboy` and idle timeout write the snapshot, then `stop(save=True)`
+flushes cartridge SRAM (`rom.gb.ram`). Live `save_ram` is optional.
 
 ### 8. stop_pyboy
 

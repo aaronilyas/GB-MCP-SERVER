@@ -21,12 +21,8 @@ from gb_mcp.emulator.backend import (
 )
 from gb_mcp.emulator.loop import PyBoyFactory, _state_path_for_rom
 from gb_mcp.emulator.play_limits import (
-    BUTTONS,
     DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
-    MAX_HOLD_FRAMES,
-    MAX_INPUT_STEPS,
-    SCREENSHOT_MODES,
 )
 
 _SUBMIT_OPS = frozenset({"input", "ping", "save", "discard_state"})
