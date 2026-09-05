@@ -13,6 +13,7 @@ _TOOL_NAMES = (
     "begin_gb_rom_upload",
     "append_gb_rom_upload",
     "finalize_gb_rom_upload",
+    "abort_gb_rom_upload",
     "map_subdirectory_to_email",
     "list_subdirectories_for_email",
     "load_subdirectory_rom",

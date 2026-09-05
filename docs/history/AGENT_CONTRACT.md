@@ -14,8 +14,10 @@ Archived coordination record for the play-loop work that landed on `main` in
 3. Screenshot-derived signals are allowed: pixel deltas, region hashes, coarse
    visual classifiers, optional OCR **from the PNG**, integer nearest-neighbor
    upscale. These are framebuffer features, not game state.
-4. Isolated ROM validation (Nintendo logo + header checksum in a no-network
-   container) is unchanged.
+4. Isolated ROM validation is Nintendo logo + header checksum + playable size
+   in a no-network container. Truncated dumps (file shorter than header 0x0148)
+   and unrecognized size codes are rejected. Extra bytes are allowed only as a
+   whole 16 KiB bank pad.
 5. Per-user isolation (email + 32-character subdirectory) is unchanged.
 6. Valid buttons: `a`, `b`, `start`, `select`, `up`, `down`, `left`, `right`.
 

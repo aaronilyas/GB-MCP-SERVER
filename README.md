@@ -56,6 +56,7 @@ Docker dump.
 | `begin_gb_rom_upload` | Start a chunked upload (`filename`, `total_bytes`, `sha256`) → `{upload_id, chunk_size}` |
 | `append_gb_rom_upload` | Append the next consecutive decoded chunk (`chunk_index` + `chunk_base64`) |
 | `finalize_gb_rom_upload` | Verify sha256/length, run the same isolated validator, persist, optional map/boot |
+| `abort_gb_rom_upload` | Cancel an in-flight chunked upload and delete staging |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
 | `list_subdirectories_for_email` | List that user's games and header metadata, including `playable` |
 | `load_subdirectory_rom` | Start / resume a play instance (default speed uncapped; 45-minute idle) |
@@ -95,8 +96,10 @@ host filesystem path. Use the three-tool ingest:
    verifies sha256 and length, then runs the **same** isolated validator
    (`container up first`, ROM bytes on stdin `docker exec`, `--network=none`).
    On success the ROM is persisted under `roms/<32-hex>/` and mapped/booted
-   like `submit_gb_rom`. Staging is always deleted. Abandoned uploads expire
-   after 30 minutes.
+   like `submit_gb_rom`. Staging is always deleted. Call
+   `abort_gb_rom_upload(upload_id)` to drop an in-flight upload without
+   persisting. Abandoned uploads expire after 30 minutes; listing a user's
+   games also reclaims expired staging.
 
 `submit_gb_rom` remains the right tool for small homebrew that fits in one
 argument.

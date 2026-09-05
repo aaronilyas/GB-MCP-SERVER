@@ -7,7 +7,7 @@ from subprocess import CompletedProcess
 
 import pytest
 
-from gb_mcp.emulator.backend import InstanceDeadError
+from gb_mcp.emulator.backend import InstanceDeadError, InstanceHandle
 from gb_mcp.emulator.instance import DockerInstanceBackend, _wait_ready
 from gb_mcp.isolation import docker as isolation
 
@@ -96,6 +96,39 @@ def test_wait_ready_strips_docker_log_blobs(
     assert "SECRET_DOCKER_DUMP" not in message
     assert "daemon" not in message.lower()
     assert "Play instance exited before it became ready" in message
+
+
+def test_send_input_omits_empty_steps_for_wait_only_docker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wait-only Docker RPCs must not send steps:[]; parse_play_input rejects that."""
+    captured: list[dict] = []
+
+    def fake_rpc(name, method, path, body, *, timeout):  # noqa: ARG001
+        captured.append(body)
+        return {"pngs_b64": []}
+
+    monkeypatch.setattr(
+        "gb_mcp.emulator.instance._container_running", lambda _name: True
+    )
+    monkeypatch.setattr("gb_mcp.emulator.instance._rpc", fake_rpc)
+
+    backend = DockerInstanceBackend()
+    handle = InstanceHandle(
+        email="owner@example.com",
+        subdirectory="a" * 32,
+        rom_path=Path("rom.gb"),
+        container_name="gb-play-" + "a" * 32,
+    )
+    backend.send_input(handle, [], "final", wait=True, hold_frames=8)
+    assert captured[0]["wait"] is True
+    assert captured[0]["hold_frames"] == 8
+    assert captured[0]["screenshot_mode"] == "final"
+    assert "steps" not in captured[0]
+
+    wait_steps = [{"buttons": [], "hold_frames": 8, "wait": True}]
+    backend.send_input(handle, wait_steps, "final")
+    assert captured[1]["steps"] == wait_steps
 
 
 def test_instance_server_truncated_rom_writes_json_stderr(

@@ -215,3 +215,41 @@ def test_expire_uploads_removes_stale(roms_dir: Path, monkeypatch) -> None:
     monkeypatch.setattr(config, "ROM_UPLOAD_TTL_SECONDS", 0)
     upload_store.expire_uploads()
     assert not dest.exists()
+
+
+def test_abort_gb_rom_upload_deletes_staging(isolated_db, roms_dir: Path) -> None:
+    rom = make_rom()
+    digest = hashlib.sha256(rom).hexdigest()
+    begun = server.begin_gb_rom_upload("game.gb", len(rom), digest)
+    upload_id = begun["upload_id"]
+    dest = roms_dir / ".uploads" / upload_id
+    assert dest.is_dir()
+    result = server.abort_gb_rom_upload(upload_id)
+    assert result["aborted"] is True
+    assert result["upload_id"] == upload_id
+    assert not dest.exists()
+    again = server.abort_gb_rom_upload(upload_id)
+    assert again["aborted"] is True
+    assert _hex_rom_dirs(roms_dir) == []
+
+
+def test_abort_gb_rom_upload_rejects_bad_id() -> None:
+    result = server.abort_gb_rom_upload("not-an-id")
+    assert result["aborted"] is False
+    assert "upload_id" in result["error"]
+
+
+def test_list_reclaims_expired_uploads(
+    isolated_db, roms_dir: Path, monkeypatch
+) -> None:
+    rom = make_rom()
+    digest = hashlib.sha256(rom).hexdigest()
+    begun = upload_store.begin_upload(
+        filename="game.gb", total_bytes=len(rom), sha256=digest
+    )
+    dest = roms_dir / ".uploads" / begun["upload_id"]
+    assert dest.is_dir()
+    monkeypatch.setattr(config, "ROM_UPLOAD_TTL_SECONDS", 0)
+    listed = server.list_subdirectories_for_email("owner@example.com")
+    assert listed["count"] == 0
+    assert not dest.exists()

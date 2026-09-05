@@ -112,6 +112,8 @@ class DockerInstanceBackend:
         if not _container_running(handle.container_name):
             raise InstanceDeadError(_dead_message(_exit_close_reason(handle.container_name)))
         body = {"screenshot_mode": screenshot_mode, **extra}
+        # Empty steps: [] is "steps provided" to parse_play_input and is
+        # rejected; wait-only / hold / mash Docker calls must omit the key.
         if steps:
             body["steps"] = steps
         remote = _rpc(

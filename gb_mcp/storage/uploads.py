@@ -265,3 +265,12 @@ def delete_upload(upload_id: str) -> None:
         return
     with _LOCK:
         shutil.rmtree(dest, ignore_errors=True)
+
+
+def abort_upload(upload_id: str) -> dict[str, Any]:
+    """Delete staging for ``upload_id``. Invalid ids raise; missing dirs succeed."""
+    dest = _upload_dir(upload_id)
+    name = dest.name
+    with _LOCK:
+        shutil.rmtree(dest, ignore_errors=True)
+    return {"upload_id": name}

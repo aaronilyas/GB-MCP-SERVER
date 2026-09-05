@@ -144,6 +144,7 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     assert "begin_gb_rom_upload" in names
     assert "append_gb_rom_upload" in names
     assert "finalize_gb_rom_upload" in names
+    assert "abort_gb_rom_upload" in names
 
     name = "d" * db.SUBDIRECTORY_NAME_LENGTH
     dest = roms_dir / name

@@ -7,6 +7,9 @@ __pycache__/
 # Accepted ROMs (keep directory, ignore binaries)
 roms/*
 !roms/.gitkeep
+# Chunked-upload staging. roms/* already ignores roms/.uploads/; keep this
+# explicit so a later !roms/... exception cannot commit in-flight dumps.
+roms/.uploads/
 *.gb
 *.gbc
 

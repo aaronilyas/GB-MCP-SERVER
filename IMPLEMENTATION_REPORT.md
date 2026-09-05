@@ -145,3 +145,7 @@ fixture.
 - This server does not play the game. Reaching Brock in 80–150 turns still
   depends on the agent’s screenshot policy (`interrupt_and_final` / `keyframes`)
   and not using 1-frame taps for walking.
+- **1 MiB commercial dumps cannot use `submit_gb_rom`.** Connector argument
+  limits typically cannot carry ~1.4 MiB of base64. Use
+  `begin_gb_rom_upload` / `append_gb_rom_upload` / `finalize_gb_rom_upload`.
+  Do not ingest from a host filesystem path.

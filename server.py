@@ -65,9 +65,11 @@ from gb_mcp.storage.roms import (
     _sanitize_filename,
 )
 from gb_mcp.storage.uploads import (
+    abort_upload,
     append_chunk,
     begin_upload,
     delete_upload,
+    expire_uploads,
     take_assembled,
 )
 
@@ -80,7 +82,8 @@ mcp = MCPServer(
         "roms/. Small homebrew can use submit_gb_rom with a single base64 "
         "argument. ROMs that exceed the connector argument limit (typical 1 MiB "
         "commercial dumps) must use begin_gb_rom_upload, append_gb_rom_upload, "
-        "and finalize_gb_rom_upload. After a ROM passes validation the server "
+        "and finalize_gb_rom_upload (abort_gb_rom_upload deletes in-flight "
+        "staging). After a ROM passes validation the server "
         "returns that subdirectory name and requests the email address of the "
         "user of the LLM. Map the two with map_subdirectory_to_email. List a "
         "user's mapped ROM subdirectories and game metadata (including playable) "
@@ -610,6 +613,31 @@ def finalize_gb_rom_upload(
 
 
 @mcp.tool(
+    name="abort_gb_rom_upload",
+    description=(
+        "Cancel a chunked ROM upload started with begin_gb_rom_upload and "
+        "delete its staging files under roms/.uploads/. Safe if the upload "
+        "already expired or was finalized. Does not delete persisted "
+        "roms/<32-hex>/ files. Isolated validation is not run."
+    ),
+)
+def abort_gb_rom_upload(upload_id: str) -> dict[str, Any]:
+    """Delete staging for an in-flight chunked ROM upload."""
+    try:
+        aborted = abort_upload(upload_id)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "aborted": False,
+            "upload_id": upload_id,
+            "error": str(exc),
+        }
+    return {
+        "aborted": True,
+        "upload_id": aborted["upload_id"],
+    }
+
+
+@mcp.tool(
     name="map_subdirectory_to_email",
     description=(
         "Map a 32-character ROM subdirectory name (returned by submit_gb_rom "
@@ -699,6 +727,10 @@ def list_subdirectories_for_email(
     ],
 ) -> dict[str, Any]:
     """Return mapped roms/ subdirectories and identifying game metadata for an email."""
+    try:
+        expire_uploads()
+    except Exception:  # noqa: BLE001 — listing must not fail if staging cleanup fails
+        pass
     try:
         with db.session_scope() as session:
             rows = db.list_subdirectories_for_email(session, email)
@@ -1452,9 +1484,9 @@ A truncated dump (file shorter than cartridge header 0x0148) is rejected. For
 ROMs that exceed the connector argument limit, do not use `submit_gb_rom`; use
 the chunked tools below. Never read a host filesystem path.
 
-### 1b. begin_gb_rom_upload / append_gb_rom_upload / finalize_gb_rom_upload
+### 1b. begin_gb_rom_upload / append_gb_rom_upload / finalize_gb_rom_upload / abort_gb_rom_upload
 
-Use this three-tool flow for a 1 MiB (or up to 8 MiB) dump that cannot fit in
+Use this chunked flow for a 1 MiB (or up to 8 MiB) dump that cannot fit in
 one `rom_base64` argument.
 
 1. `begin_gb_rom_upload(filename, total_bytes, sha256, email?)` →
@@ -1464,8 +1496,11 @@ one `rom_base64` argument.
 3. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?)` concatenates,
    verifies sha256 and length, runs the same isolated validator, persists,
    optionally maps and boots. Same result shape as `submit_gb_rom`.
+4. `abort_gb_rom_upload(upload_id)` deletes staging without persisting. Safe
+   if the upload already expired or was finalized.
 
-Abandoned uploads expire after about 30 minutes.
+Abandoned uploads expire after about 30 minutes. Listing a user's games also
+reclaims expired staging.
 
 ### 2. map_subdirectory_to_email
 
