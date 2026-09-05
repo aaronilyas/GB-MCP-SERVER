@@ -132,6 +132,7 @@ def test_describe_rom_and_other_files(roms_dir: Path) -> None:
     assert len(info["games"]) == 1
     assert info["games"][0]["title"] == "TETRIS"
     assert info["games"][0]["has_battery"] is True
+    assert info["games"][0]["playable"] is True
     assert "TETRIS" in info["summary"]
 
     kinds = {entry["filename"]: entry.get("kind") for entry in info["files"]}
@@ -164,3 +165,32 @@ def test_rom_in_subdirectory_skips_invalid_and_picks_first_valid(roms_dir: Path)
     (dest / "alpha.gb").write_bytes(make_rom(title=b"ALPHA"))
     (dest / "zeta.gb").write_bytes(make_rom(title=b"ZETA"))
     assert _rom_in_subdirectory("games").name == "alpha.gb"
+
+
+def test_rom_in_subdirectory_rejects_truncated_pokemon_header(roms_dir: Path) -> None:
+    dest = roms_dir / "games"
+    dest.mkdir()
+    (dest / "red.gb").write_bytes(
+        make_rom(size=1024, title=b"POKEMON RED", rom_size_code=0x05)
+    )
+    with pytest.raises(ValueError, match="truncated") as excinfo:
+        _rom_in_subdirectory("games")
+    assert "1024" in str(excinfo.value)
+    assert "1048576" in str(excinfo.value)
+
+
+def test_describe_truncated_rom_flags_unplayable(roms_dir: Path) -> None:
+    dest = roms_dir / "games"
+    dest.mkdir()
+    (dest / "red.gb").write_bytes(
+        make_rom(size=1024, title=b"POKEMON RED", rom_size_code=0x05)
+    )
+    info = _describe_subdirectory("games", None)
+    assert len(info["games"]) == 1
+    game = info["games"][0]
+    assert game["title"] == "POKEMON RED"
+    assert game["playable"] is False
+    assert "1024" in game["unplayable_reason"]
+    assert "1048576" in game["unplayable_reason"]
+    red = next(e for e in info["files"] if e["filename"] == "red.gb")
+    assert red["playable"] is False

@@ -70,6 +70,28 @@ def test_create_isolated_container_start_failure_removes(monkeypatch: pytest.Mon
     create_args = calls[0]
     assert "--network" in create_args and "none" in create_args
     assert "--cap-drop" in create_args and "ALL" in create_args
+    assert "GB_ROM_ALLOW_UNKNOWN_SIZE=1" not in create_args
+
+
+def test_create_isolated_container_passes_unknown_size_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run_docker(args, *, input_bytes=None, timeout=60):
+        calls.append(args)
+        if args[0] == "create":
+            return CompletedProcess(args=args, returncode=0, stdout=b"abc123\n", stderr=b"")
+        if args[0] == "start":
+            return CompletedProcess(args=args, returncode=0, stdout=b"", stderr=b"")
+        return CompletedProcess(args=args, returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setenv("GB_ROM_ALLOW_UNKNOWN_SIZE", "1")
+    monkeypatch.setattr(docker, "_run_docker", fake_run_docker)
+    assert docker._create_isolated_container() == "abc123"
+    create_args = calls[0]
+    assert "-e" in create_args
+    assert "GB_ROM_ALLOW_UNKNOWN_SIZE=1" in create_args
 
 
 def test_docker_available_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:

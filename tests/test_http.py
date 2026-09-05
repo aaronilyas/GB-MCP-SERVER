@@ -141,6 +141,9 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     names = [tool["name"] for tool in listed_msg["result"]["tools"]]
     assert "list_subdirectories_for_email" in names
     assert "submit_gb_rom" in names
+    assert "begin_gb_rom_upload" in names
+    assert "append_gb_rom_upload" in names
+    assert "finalize_gb_rom_upload" in names
 
     name = "d" * db.SUBDIRECTORY_NAME_LENGTH
     dest = roms_dir / name

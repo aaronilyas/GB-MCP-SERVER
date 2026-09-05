@@ -487,7 +487,11 @@ def test_docker_play_instance_save_survives_rm(
         result = manager.load("owner@example.com", name, rom_path)
         assert result.get("started") is True, result.get("error")
         assert result["running"] is True
-        sent = manager.send_input("owner@example.com", name, ["a"])
+        sent = manager.send_input(
+            "owner@example.com",
+            name,
+            steps=[{"buttons": ["a"], "hold_frames": 1}],
+        )
         assert sent.get("sent") is True, sent.get("error")
         assert sent["screenshot_count"] == 1
         assert sent["pngs"][0].startswith(PNG_MAGIC)

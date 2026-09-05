@@ -2,7 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gb_mcp.gb.header import _decode_header_text, _read_rom_identity
+import pytest
+
+from gb_mcp.gb.header import (
+    _decode_header_text,
+    _read_rom_identity,
+    assert_rom_playable,
+    inspect_rom_playable,
+)
 
 from rom_builder import make_rom
 
@@ -32,7 +39,9 @@ def test_read_rom_identity_original_game_boy(tmp_path: Path) -> None:
     assert identity["has_battery"] is False
     assert identity["destination"] == "Japan"
     assert identity["manufacturer_code"] is None
+    assert identity["playable"] is True
     assert "error" not in identity
+    assert "unplayable_reason" not in identity
 
 
 def test_read_rom_identity_cgb_compatible(tmp_path: Path) -> None:
@@ -88,3 +97,26 @@ def test_read_rom_identity_missing_file(tmp_path: Path) -> None:
     identity = _read_rom_identity(tmp_path / "missing.gb")
     assert "error" in identity
     assert identity["kind"] == "rom"
+
+
+def test_assert_rom_playable_rejects_truncated_pokemon_header(tmp_path: Path) -> None:
+    rom = make_rom(size=1024, title=b"POKEMON RED", rom_size_code=0x05)
+    path = _write_rom(tmp_path / "red.gb", rom)
+    info = inspect_rom_playable(rom)
+    assert info["playable"] is False
+    assert "1024" in info["unplayable_reason"]
+    assert "1048576" in info["unplayable_reason"]
+    with pytest.raises(ValueError, match="1024") as excinfo:
+        assert_rom_playable(path)
+    assert "1048576" in str(excinfo.value)
+    identity = _read_rom_identity(path)
+    assert identity["playable"] is False
+    assert identity["title"] == "POKEMON RED"
+    assert "unplayable_reason" in identity
+
+
+def test_assert_rom_playable_accepts_full_size() -> None:
+    rom = make_rom()
+    info = assert_rom_playable(rom)
+    assert info["playable"] is True
+    assert info["size_bytes"] == 32 * 1024

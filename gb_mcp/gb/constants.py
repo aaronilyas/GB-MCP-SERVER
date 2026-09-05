@@ -21,6 +21,8 @@ NINTENDO_LOGO = bytes(
 
 MIN_ROM_BYTES = 0x150
 MAX_ROM_BYTES = 8 * 1024 * 1024
+# Extra bytes beyond header 0x0148 are a valid pad only when they are whole banks.
+ROM_BANK_BYTES = 16 * 1024
 
 # Cartridge header 0x0147. Used so listing can say what mapper/saves a ROM has.
 CARTRIDGE_TYPES: dict[int, str] = {

@@ -2,13 +2,28 @@
 """Validate a candidate Game Boy / Game Boy Color ROM header.
 
 Runs only inside the isolated gb-rom-validator container. Exits 0 when the
-file passes Nintendo logo + header checksum checks; exits 1 otherwise.
-Prints a single JSON object to stdout describing the result.
+file passes Nintendo logo + header checksum + playable-size checks; exits 1
+otherwise. Prints a single JSON object to stdout describing the result.
+
+Size vs cartridge header 0x0148 (Pan Docs codes 0x00–0x08):
+
+- Known size code and ``len(data) < expected``: **reject** (truncated). The
+  reason names the actual size, the expected size, and the size code.
+- Known size code and ``len(data) > expected``: **allow** only when the extra
+  bytes are a whole-bank pad (a multiple of 16 KiB). Homebrew / padded dumps
+  sometimes append blank banks; leftover bytes that are not a whole bank are
+  rejected. Accepted pads may set ``size_note``.
+- Unrecognized 0x0148: **reject** so mystery dumps that PyBoy will crash on
+  are not persisted. Operators may set ``GB_ROM_ALLOW_UNKNOWN_SIZE=1`` to
+  accept them (``size_note`` is set). Default is off.
+
+Truncated dumps are never accepted, so they never carry ``size_note``.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -39,11 +54,61 @@ ROM_SIZE_BYTES = {
 
 MIN_ROM_BYTES = 0x150
 MAX_ROM_BYTES = 8 * 1024 * 1024
+ROM_BANK_BYTES = 16 * 1024
 
 
 def _title(data: bytes) -> str:
     raw = data[0x134:0x144]
     return raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").strip()
+
+
+def _allow_unknown_rom_size() -> bool:
+    return os.environ.get("GB_ROM_ALLOW_UNKNOWN_SIZE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _size_reason(size: int, rom_size_code: int) -> tuple[bool, str | None, str | None]:
+    """Return (ok, reject_reason, size_note) for header 0x0148 vs file length."""
+    expected = ROM_SIZE_BYTES.get(rom_size_code)
+    if expected is None:
+        note = f"unrecognized ROM size code 0x{rom_size_code:02X}"
+        if _allow_unknown_rom_size():
+            return True, None, note
+        return (
+            False,
+            (
+                f"{note}; expected a cartridge size code 0x00–0x08. "
+                "Re-submit a complete dump or set GB_ROM_ALLOW_UNKNOWN_SIZE=1"
+            ),
+            None,
+        )
+    if size < expected:
+        return (
+            False,
+            (
+                f"ROM is truncated ({size} bytes; header size code "
+                f"0x{rom_size_code:02X} expects {expected}). "
+                "Re-submit the complete .gb."
+            ),
+            None,
+        )
+    if size > expected:
+        extra = size - expected
+        if extra % ROM_BANK_BYTES != 0:
+            return (
+                False,
+                (
+                    f"ROM is padded by {extra} bytes which is not a whole 16 KiB "
+                    f"bank (header size code 0x{rom_size_code:02X} expects {expected})"
+                ),
+                None,
+            )
+        return True, None, f"size {size} != header expectation {expected}"
+    return True, None, None
 
 
 def validate_gb_rom_bytes(data: bytes) -> dict:
@@ -77,13 +142,14 @@ def validate_gb_rom_bytes(data: bytes) -> dict:
         }
 
     rom_size_code = data[0x148]
-    expected = ROM_SIZE_BYTES.get(rom_size_code)
-    size_note = None
-    if expected is None:
-        size_note = f"unrecognized ROM size code 0x{rom_size_code:02X}"
-    elif size != expected:
-        # Homebrew / padded dumps sometimes differ; logo+checksum already passed.
-        size_note = f"size {size} != header expectation {expected}"
+    ok, reject_reason, size_note = _size_reason(size, rom_size_code)
+    if not ok:
+        return {
+            "valid": False,
+            "reason": reject_reason,
+            "size_bytes": size,
+            "rom_size_code": rom_size_code,
+        }
 
     cgb_flag = data[0x143]
     is_cgb = bool(cgb_flag & 0x80)

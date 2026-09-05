@@ -48,6 +48,7 @@ from gb_mcp.emulator.play_limits import (
     MAX_UNTIL_EVAL_INTERVAL,
     MIN_UNTIL_EVAL_INTERVAL,
 )
+from gb_mcp.gb.header import assert_rom_playable
 from gb_mcp.http import attach_public_routes, run_http
 from gb_mcp.isolation.docker import (
     _create_isolated_container,
@@ -63,6 +64,12 @@ from gb_mcp.storage.roms import (
     _rom_in_subdirectory,
     _sanitize_filename,
 )
+from gb_mcp.storage.uploads import (
+    append_chunk,
+    begin_upload,
+    delete_upload,
+    take_assembled,
+)
 
 mcp = MCPServer(
     "gb-mcp-server",
@@ -70,10 +77,14 @@ mcp = MCPServer(
         "Accepts Game Boy ROM binaries from the model, validates them inside an "
         "isolated Docker container with no internet access, and saves only "
         "confirmed .gb/.gbc files under a unique 32-character subdirectory of "
-        "roms/. After a ROM passes validation the server returns that "
-        "subdirectory name and requests the email address of the user of the "
-        "LLM. Map the two with map_subdirectory_to_email. List a user's mapped "
-        "ROM subdirectories and game metadata with list_subdirectories_for_email. "
+        "roms/. Small homebrew can use submit_gb_rom with a single base64 "
+        "argument. ROMs that exceed the connector argument limit (typical 1 MiB "
+        "commercial dumps) must use begin_gb_rom_upload, append_gb_rom_upload, "
+        "and finalize_gb_rom_upload. After a ROM passes validation the server "
+        "returns that subdirectory name and requests the email address of the "
+        "user of the LLM. Map the two with map_subdirectory_to_email. List a "
+        "user's mapped ROM subdirectories and game metadata (including playable) "
+        "with list_subdirectories_for_email. "
         "Load a mapped subdirectory's ROM into PyBoy with load_subdirectory_rom "
         "(email and subdirectory name are both required; default speed is uncapped). "
         "Play with send_pyboy_input (buttons, steps, macros, optional until on the "
@@ -181,19 +192,138 @@ def _call_manager_method(method: Any, *args: Any, **kwargs: Any) -> Any:
     return method(*args, **accepted)
 
 
+def _run_isolated_validation(rom_bytes: bytes) -> dict[str, Any]:
+    """Container up first, then ROM bytes via stdin docker exec. Network none."""
+    container_id: str | None = None
+    try:
+        _docker_available()
+        _ensure_image()
+        container_id = _create_isolated_container()
+        return _validate_inside_container(container_id, rom_bytes)
+    finally:
+        if container_id:
+            _destroy_container(container_id)
+
+
+def _invalid_rom_result(validation: dict[str, Any], *, error: str | None = None) -> dict[str, Any]:
+    return {
+        "accepted": False,
+        "saved": False,
+        "path": None,
+        "subdirectory": None,
+        "mapped": False,
+        "validation": validation,
+        "error": error or validation.get("reason", "not a valid Game Boy ROM"),
+    }
+
+
+def _reject_unplayable_or_invalid(
+    rom_bytes: bytes, validation: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not validation.get("valid"):
+        return _invalid_rom_result(validation)
+    try:
+        assert_rom_playable(rom_bytes)
+    except ValueError as exc:
+        rejected = dict(validation)
+        rejected["valid"] = False
+        rejected["reason"] = str(exc)
+        return _invalid_rom_result(rejected, error=str(exc))
+    return None
+
+
+def _persist_map_boot(
+    *,
+    rom_bytes: bytes,
+    filename: str,
+    email: str | None,
+    boot: bool,
+    validation: dict[str, Any],
+) -> dict[str, Any]:
+    safe_name = _sanitize_filename(filename)
+    try:
+        subdirectory = _allocate_subdirectory_name()
+        dest = _persist_validated_rom(subdirectory, safe_name, rom_bytes)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "accepted": False,
+            "saved": False,
+            "path": None,
+            "subdirectory": None,
+            "mapped": False,
+            "validation": validation,
+            "error": f"failed to save ROM: {exc}",
+        }
+
+    result: dict[str, Any] = {
+        "accepted": True,
+        "saved": True,
+        "path": str(dest.relative_to(config.ROOT)),
+        "subdirectory": subdirectory,
+        "mapped": False,
+        "validation": validation,
+    }
+
+    provided_email = _optional_email(email)
+    if provided_email is not None:
+        try:
+            with db.session_scope() as session:
+                mapped = db.map_subdirectory_to_email(session, subdirectory, provided_email)
+                result["email"] = mapped.user.email
+            result["mapped"] = True
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = f"ROM saved but email could not be mapped: {exc}"
+
+    if not result["mapped"]:
+        result["model_request"] = _email_model_request(subdirectory)
+        if boot:
+            result["started"] = False
+            result["running"] = False
+        return result
+
+    if boot:
+        try:
+            rom_path = _rom_in_subdirectory(subdirectory)
+            loaded = _call_manager_method(
+                pyboy_sessions.manager.load,
+                result["email"],
+                subdirectory,
+                rom_path,
+                emulation_speed=DEFAULT_EMULATION_SPEED,
+                idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:  # noqa: BLE001
+            result["started"] = False
+            result["running"] = False
+            result["error"] = f"ROM saved and mapped but PyBoy did not start: {exc}"
+            return result
+        result["started"] = loaded.get("started", False)
+        result["running"] = loaded.get("running", False)
+        for key, value in loaded.items():
+            if key not in result:
+                result[key] = value
+        if loaded.get("error") and not result["started"]:
+            result["error"] = loaded["error"]
+    return result
+
+
 @mcp.tool(
     name="submit_gb_rom",
     description=(
         "Submit a Game Boy / Game Boy Color ROM for isolated validation. "
         "Provide the ROM as base64. A Docker container with no internet access "
         "is started first; the ROM is loaded into that container only after it "
-        "is running; validation (Nintendo logo + header checksum) runs inside "
-        "the container; the container is removed afterward. If validation "
-        "succeeds the file is saved under roms/<32-character-subdirectory>/ "
-        "and the server returns that name and requests the email address of "
-        "the user of the LLM so the subdirectory can be mapped to that user. "
-        "If email is already known the subdirectory is mapped automatically. "
-        "Pass boot=true to also start PyBoy after a successful map."
+        "is running; validation (Nintendo logo + header checksum + playable "
+        "size) runs inside the container; the container is removed afterward. "
+        "If validation succeeds the file is saved under "
+        "roms/<32-character-subdirectory>/ and the server returns that name "
+        "and requests the email address of the user of the LLM so the "
+        "subdirectory can be mapped to that user. If email is already known "
+        "the subdirectory is mapped automatically. Pass boot=true to also "
+        "start PyBoy after a successful map. For ROMs that exceed the "
+        "connector argument limit, use begin_gb_rom_upload / "
+        "append_gb_rom_upload / finalize_gb_rom_upload instead of a single "
+        "rom_base64 argument."
     ),
 )
 def submit_gb_rom(
@@ -276,16 +406,9 @@ def submit_gb_rom(
             "error": f"ROM exceeds maximum size of {MAX_ROM_BYTES} bytes",
         }
 
-    safe_name = _sanitize_filename(filename)
-    container_id: str | None = None
-
     try:
-        _docker_available()
-        _ensure_image()
-
         # Isolation first: bring up a network-less container, then stream the ROM in.
-        container_id = _create_isolated_container()
-        validation = _validate_inside_container(container_id, rom_bytes)
+        validation = _run_isolated_validation(rom_bytes)
     except Exception as exc:  # noqa: BLE001
         return {
             "accepted": False,
@@ -293,85 +416,197 @@ def submit_gb_rom(
             "path": None,
             "error": str(exc),
         }
-    finally:
-        if container_id:
-            _destroy_container(container_id)
 
-    if not validation.get("valid"):
+    rejected = _reject_unplayable_or_invalid(rom_bytes, validation)
+    if rejected is not None:
+        return rejected
+    return _persist_map_boot(
+        rom_bytes=rom_bytes,
+        filename=filename,
+        email=email,
+        boot=boot,
+        validation=validation,
+    )
+
+
+@mcp.tool(
+    name="begin_gb_rom_upload",
+    description=(
+        "Start a chunked Game Boy ROM upload when the ROM is too large to pass "
+        "as a single submit_gb_rom rom_base64 argument (1 MiB dumps often exceed "
+        "connector limits). Provide filename, total_bytes, and sha256 of the "
+        "complete file. Returns upload_id and chunk_size (decoded bytes per "
+        "append; default 24 KiB, override with GB_ROM_UPLOAD_CHUNK_BYTES). Then "
+        "call append_gb_rom_upload for consecutive chunks and "
+        "finalize_gb_rom_upload. Isolated Docker validation still runs on the "
+        "assembled bytes. Does not read a host filesystem path."
+    ),
+)
+def begin_gb_rom_upload(
+    filename: str,
+    total_bytes: int,
+    sha256: str,
+    email: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional. Email of the LLM user. Stored on the upload and used "
+                "by finalize_gb_rom_upload if that call omits email."
+            ),
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Allocate a staging upload for a ROM that will arrive in chunks."""
+    try:
+        started = begin_upload(
+            filename=filename,
+            total_bytes=total_bytes,
+            sha256=sha256,
+            email=_optional_email(email),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "started": False,
+            "upload_id": None,
+            "error": str(exc),
+        }
+    return {
+        "started": True,
+        "upload_id": started["upload_id"],
+        "chunk_size": started["chunk_size"],
+        "total_bytes": started["total_bytes"],
+        "filename": started["filename"],
+    }
+
+
+@mcp.tool(
+    name="append_gb_rom_upload",
+    description=(
+        "Append the next consecutive chunk of a ROM started with "
+        "begin_gb_rom_upload. chunk_index is 0-based and must equal next_index "
+        "from the previous append (holes are rejected). chunk_base64 is one "
+        "slice of at most chunk_size decoded bytes. Returns received_bytes and "
+        "next_index. Call finalize_gb_rom_upload after the last chunk."
+    ),
+)
+def append_gb_rom_upload(
+    upload_id: str,
+    chunk_index: int,
+    chunk_base64: str,
+) -> dict[str, Any]:
+    """Append one decoded chunk to a staging upload."""
+    try:
+        appended = append_chunk(
+            upload_id=upload_id,
+            chunk_index=chunk_index,
+            chunk_base64=chunk_base64,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "appended": False,
+            "upload_id": upload_id,
+            "error": str(exc),
+        }
+    return {
+        "appended": True,
+        "upload_id": appended["upload_id"],
+        "received_bytes": appended["received_bytes"],
+        "next_index": appended["next_index"],
+        "total_bytes": appended["total_bytes"],
+    }
+
+
+@mcp.tool(
+    name="finalize_gb_rom_upload",
+    description=(
+        "Finish a chunked ROM upload: concatenate staging chunks, verify "
+        "sha256 and total_bytes, run the same isolated Docker validator as "
+        "submit_gb_rom (container up first, bytes via stdin, --network=none), "
+        "persist under roms/<32-hex>/ on success, optionally map to email and "
+        "boot PyBoy. Staging files are always deleted. Same result shape as "
+        "submit_gb_rom."
+    ),
+)
+def finalize_gb_rom_upload(
+    upload_id: str,
+    filename: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="Optional override of the filename given to begin_gb_rom_upload.",
+        ),
+    ] = None,
+    email: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "Optional. Email of the LLM user. Overrides the email stored at "
+                "begin_gb_rom_upload if both are provided."
+            ),
+        ),
+    ] = None,
+    boot: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "If true and the ROM is mapped to email, start PyBoy after a "
+                "successful persist (same as submit_gb_rom boot=true)."
+            ),
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Assemble, isolate-validate, and persist a chunked ROM upload."""
+    assembled: bytes | None = None
+    meta: dict[str, Any] | None = None
+    try:
+        assembled, meta = take_assembled(upload_id)
+    except Exception as exc:  # noqa: BLE001
+        delete_upload(upload_id)
         return {
             "accepted": False,
             "saved": False,
             "path": None,
             "subdirectory": None,
             "mapped": False,
-            "validation": validation,
-            "error": validation.get("reason", "not a valid Game Boy ROM"),
+            "error": str(exc),
         }
 
     try:
-        subdirectory = _allocate_subdirectory_name()
-        dest = _persist_validated_rom(subdirectory, safe_name, rom_bytes)
-    except Exception as exc:  # noqa: BLE001
-        return {
-            "accepted": False,
-            "saved": False,
-            "path": None,
-            "subdirectory": None,
-            "mapped": False,
-            "validation": validation,
-            "error": f"failed to save ROM: {exc}",
-        }
-
-    result: dict[str, Any] = {
-        "accepted": True,
-        "saved": True,
-        "path": str(dest.relative_to(config.ROOT)),
-        "subdirectory": subdirectory,
-        "mapped": False,
-        "validation": validation,
-    }
-
-    provided_email = _optional_email(email)
-    if provided_email is not None:
         try:
-            with db.session_scope() as session:
-                mapped = db.map_subdirectory_to_email(session, subdirectory, provided_email)
-                result["email"] = mapped.user.email
-            result["mapped"] = True
+            validation = _run_isolated_validation(assembled)
         except Exception as exc:  # noqa: BLE001
-            result["error"] = f"ROM saved but email could not be mapped: {exc}"
-
-    if not result["mapped"]:
-        result["model_request"] = _email_model_request(subdirectory)
-        if boot:
-            result["started"] = False
-            result["running"] = False
-        return result
-
-    if boot:
-        try:
-            rom_path = _rom_in_subdirectory(subdirectory)
-            loaded = _call_manager_method(
-                pyboy_sessions.manager.load,
-                result["email"],
-                subdirectory,
-                rom_path,
-                emulation_speed=DEFAULT_EMULATION_SPEED,
-                idle_timeout_seconds=DEFAULT_IDLE_TIMEOUT_SECONDS,
-            )
-        except Exception as exc:  # noqa: BLE001
-            result["started"] = False
-            result["running"] = False
-            result["error"] = f"ROM saved and mapped but PyBoy did not start: {exc}"
-            return result
-        result["started"] = loaded.get("started", False)
-        result["running"] = loaded.get("running", False)
-        for key, value in loaded.items():
-            if key not in result:
-                result[key] = value
-        if loaded.get("error") and not result["started"]:
-            result["error"] = loaded["error"]
-    return result
+            return {
+                "accepted": False,
+                "saved": False,
+                "path": None,
+                "subdirectory": None,
+                "mapped": False,
+                "error": str(exc),
+            }
+        rejected = _reject_unplayable_or_invalid(assembled, validation)
+        if rejected is not None:
+            return rejected
+        chosen_name = (
+            filename.strip()
+            if isinstance(filename, str) and filename.strip()
+            else meta.get("filename")
+        )
+        chosen_email = _optional_email(email)
+        if chosen_email is None:
+            stored = meta.get("email")
+            chosen_email = stored if isinstance(stored, str) else None
+        return _persist_map_boot(
+            rom_bytes=assembled,
+            filename=str(chosen_name or "rom.gb"),
+            email=chosen_email,
+            boot=boot,
+            validation=validation,
+        )
+    finally:
+        delete_upload(upload_id)
 
 
 @mcp.tool(
@@ -444,9 +679,11 @@ def map_subdirectory_to_email(
         "List ROM subdirectories mapped to the email address of the user of "
         "the LLM, with metadata that identifies which game each subdirectory "
         "holds (title from the cartridge header, platform, mapper, battery, "
-        "file names and sizes). Call this when you need to find an existing "
-        "game directory for that user. Ask the user for their email if you "
-        "do not already have it."
+        "file names and sizes, and playable). playable is false when the "
+        "stored file is shorter than the cartridge header size code (a "
+        "truncated dump cannot be booted). Call this when you need to find an "
+        "existing game directory for that user. Ask the user for their email "
+        "if you do not already have it."
     ),
 )
 def list_subdirectories_for_email(
@@ -581,6 +818,22 @@ def load_subdirectory_rom(
 
     try:
         rom_path = _rom_in_subdirectory(name)
+    except FileNotFoundError as exc:
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": str(exc),
+        }
+    except ValueError as exc:
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "error": f"failed to start PyBoy: {exc}",
+        }
     except Exception as exc:  # noqa: BLE001
         return {
             "started": False,
@@ -1180,8 +1433,8 @@ PyBoy memory peeks.
 
 ## Workflow
 
-Typical order: submit → map → list → load → input / ping / save → stop. Skip
-submit and map when the human already has mapped games.
+Typical order: submit (or begin/append/finalize) → map → list → load → input /
+ping / save → stop. Skip submit and map when the human already has mapped games.
 
 ### 1. submit_gb_rom
 
@@ -1195,6 +1448,25 @@ present the subdirectory is mapped automatically. `boot=true` starts PyBoy
 after a successful map (uncapped speed, 45-minute idle); if not mapped, PyBoy
 is not started.
 
+A truncated dump (file shorter than cartridge header 0x0148) is rejected. For
+ROMs that exceed the connector argument limit, do not use `submit_gb_rom`; use
+the chunked tools below. Never read a host filesystem path.
+
+### 1b. begin_gb_rom_upload / append_gb_rom_upload / finalize_gb_rom_upload
+
+Use this three-tool flow for a 1 MiB (or up to 8 MiB) dump that cannot fit in
+one `rom_base64` argument.
+
+1. `begin_gb_rom_upload(filename, total_bytes, sha256, email?)` →
+   `{upload_id, chunk_size}` (`chunk_size` default 24576 decoded bytes).
+2. `append_gb_rom_upload(upload_id, chunk_index, chunk_base64)` for each
+   consecutive slice (`chunk_index` starts at 0; holes are rejected).
+3. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?)` concatenates,
+   verifies sha256 and length, runs the same isolated validator, persists,
+   optionally maps and boots. Same result shape as `submit_gb_rom`.
+
+Abandoned uploads expire after about 30 minutes.
+
 ### 2. map_subdirectory_to_email
 
 Bind that 32-character hex name to the LLM user's email. Ask the human for
@@ -1202,9 +1474,10 @@ their email if you do not already have it. Never invent an email.
 
 ### 3. list_subdirectories_for_email
 
-Find that user's games. Results include cartridge header title, platform, and
-other identifying metadata. Ask the human for their email if you do not
-already have it.
+Find that user's games. Results include cartridge header title, platform,
+`playable`, and other identifying metadata. `playable: false` means the stored
+file is truncated or otherwise unbootable; re-submit the complete ROM. Ask the
+human for their email if you do not already have it.
 
 ### 4. load_subdirectory_rom
 
@@ -1267,8 +1540,9 @@ for this guide:
     "gb://usage",
     mime_type="text/markdown",
     description=(
-        "How a connected model should use this Game Boy MCP server (submit, map, "
-        "list, load, play, ping, save, stop). Contains no user data."
+        "How a connected model should use this Game Boy MCP server (submit or "
+        "chunked upload, map, list, load, play, ping, save, stop). Contains no "
+        "user data."
     ),
 )
 def usage_resource() -> str:

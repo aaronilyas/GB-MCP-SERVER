@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import uuid
 from typing import Any
@@ -63,36 +64,41 @@ def _run_docker(args: list[str], *, input_bytes: bytes | None = None, timeout: i
 def _create_isolated_container() -> str:
     """Start a locked-down container before any ROM bytes are loaded into it."""
     name = f"gb-rom-validate-{uuid.uuid4().hex[:12]}"
-    create = _run_docker(
+    create_args = [
+        "create",
+        "--name",
+        name,
+        "--network",
+        "none",
+        "--read-only",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=32m",
+        "--tmpfs",
+        "/work:rw,noexec,nosuid,size=64m",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges:true",
+        "--user",
+        "10001:10001",
+        "--memory",
+        "256m",
+        "--cpus",
+        "1",
+        "--pids-limit",
+        "64",
+    ]
+    allow = os.environ.get("GB_ROM_ALLOW_UNKNOWN_SIZE", "").strip().lower()
+    if allow in {"1", "true", "yes", "on"}:
+        create_args.extend(["-e", "GB_ROM_ALLOW_UNKNOWN_SIZE=1"])
+    create_args.extend(
         [
-            "create",
-            "--name",
-            name,
-            "--network",
-            "none",
-            "--read-only",
-            "--tmpfs",
-            "/tmp:rw,noexec,nosuid,size=32m",
-            "--tmpfs",
-            "/work:rw,noexec,nosuid,size=64m",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges:true",
-            "--user",
-            "10001:10001",
-            "--memory",
-            "256m",
-            "--cpus",
-            "1",
-            "--pids-limit",
-            "64",
             config.DOCKER_IMAGE,
             "sleep",
             "infinity",
-        ],
-        timeout=60,
+        ]
     )
+    create = _run_docker(create_args, timeout=60)
     if create.returncode != 0:
         raise RuntimeError(
             f"Failed to create isolated container: {create.stderr.decode(errors='replace')}"

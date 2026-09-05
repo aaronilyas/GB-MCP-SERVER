@@ -13,7 +13,7 @@ from typing import Any
 import db
 from gb_mcp import config
 from gb_mcp.gb.constants import ROM_SUFFIXES
-from gb_mcp.gb.header import _read_rom_identity
+from gb_mcp.gb.header import _read_rom_identity, assert_rom_playable
 
 
 def _sanitize_filename(name: str) -> str:
@@ -90,10 +90,19 @@ def _rom_in_subdirectory(name: str) -> Path:
     if not roms:
         raise FileNotFoundError(f"no Game Boy ROM found in subdirectory {name!r}")
 
+    last_unplayable: ValueError | None = None
     for path in roms:
         identity = _read_rom_identity(path)
-        if "error" not in identity:
-            return path
+        if "error" in identity:
+            continue
+        try:
+            assert_rom_playable(path)
+        except ValueError as exc:
+            last_unplayable = exc
+            continue
+        return path
+    if last_unplayable is not None:
+        raise last_unplayable
     raise FileNotFoundError(f"no valid Game Boy ROM found in subdirectory {name!r}")
 
 
@@ -143,18 +152,21 @@ def _describe_subdirectory(name: str, created_at: datetime | None) -> dict[str, 
             if path.suffix.lower() in ROM_SUFFIXES:
                 identity = _read_rom_identity(path)
                 entry.update(identity)
-                # Truncated/unreadable .gb/.gbc stay in files, not in games.
+                # Header-unreadable .gb/.gbc stay in files, not in games.
+                # Header-parseable but truncated dumps stay in games with playable: false.
                 if "error" not in identity:
-                    games.append(
-                        {
-                            "title": identity.get("title"),
-                            "filename": path.name,
-                            "platform": identity.get("platform"),
-                            "cartridge_type": identity.get("cartridge_type"),
-                            "has_battery": identity.get("has_battery"),
-                            "size_bytes": stat.st_size,
-                        }
-                    )
+                    game: dict[str, Any] = {
+                        "title": identity.get("title"),
+                        "filename": path.name,
+                        "platform": identity.get("platform"),
+                        "cartridge_type": identity.get("cartridge_type"),
+                        "has_battery": identity.get("has_battery"),
+                        "size_bytes": stat.st_size,
+                        "playable": bool(identity.get("playable", True)),
+                    }
+                    if not game["playable"] and identity.get("unplayable_reason"):
+                        game["unplayable_reason"] = identity["unplayable_reason"]
+                    games.append(game)
             else:
                 entry["kind"] = "other"
             files.append(entry)

@@ -29,7 +29,12 @@ and are not published.
 
 `submit_gb_rom` still streams the ROM on stdin into a locked-down validator
 (`network=none`, read-only, `cap-drop=ALL`, then `rm -f`). Logo + header
-checksum are required; file extension is not enough.
+checksum are required; file extension is not enough. The file length must
+match cartridge header 0x0148 (truncated dumps are rejected; extra bytes are
+allowed only as a whole 16 KiB bank pad). Unrecognized size codes are
+rejected unless `GB_ROM_ALLOW_UNKNOWN_SIZE=1`. Listing exposes `playable`
+(false when a stored file is shorter than that header expectation, including
+dumps persisted before this check).
 
 Play is **not** in-process. `load_subdirectory_rom` starts or reuses
 `gb-play-<subdir hex>`, mounting only that subdirectory (ROM read-only, `.state`
@@ -47,9 +52,12 @@ Docker dump.
 
 | Tool | Purpose |
 | --- | --- |
-| `submit_gb_rom` | Base64 ROM in; isolated Docker validation; persist on success. Optional `boot=true` starts PyBoy after a mapped submit |
+| `submit_gb_rom` | Base64 ROM in; isolated Docker validation; persist on success. Optional `boot=true` starts PyBoy after a mapped submit. For ROMs that exceed the connector argument limit, use begin/append/finalize instead of one `rom_base64` string |
+| `begin_gb_rom_upload` | Start a chunked upload (`filename`, `total_bytes`, `sha256`) → `{upload_id, chunk_size}` |
+| `append_gb_rom_upload` | Append the next consecutive decoded chunk (`chunk_index` + `chunk_base64`) |
+| `finalize_gb_rom_upload` | Verify sha256/length, run the same isolated validator, persist, optional map/boot |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
-| `list_subdirectories_for_email` | List that user's games and header metadata |
+| `list_subdirectories_for_email` | List that user's games and header metadata, including `playable` |
 | `load_subdirectory_rom` | Start / resume a play instance (default speed uncapped; 45-minute idle) |
 | `send_pyboy_input` | Buttons, steps, macros, optional framebuffer `until`; returns PNG screenshot(s) at scale 4 |
 | `ping_pyboy` | Reset the idle timer without advancing emulation or pressing buttons |
@@ -64,6 +72,34 @@ to the volume and remove the container after **45 minutes** without
 `send_pyboy_input` or `ping_pyboy`. Agents should call `ping_pyboy` if they
 will think longer than about 30 seconds. Override idle with
 `GB_PYBOY_IDLE_TIMEOUT_SECONDS` (default 2700).
+
+### Chunked ROM upload (1 MiB and up)
+
+Hosted MCP connectors and LLM tool-argument caps often cannot carry a 1 MiB
+ROM as a single `submit_gb_rom.rom_base64` string (~1.4 MiB of base64). The
+server limit (`MAX_ROM_B64_CHARS`, ~11M characters for 8 MiB decoded) is not
+the problem — the transport is. Do **not** work around this by reading a
+host filesystem path. Use the three-tool ingest:
+
+1. SHA-256 the complete `.gb` / `.gbc` and note `total_bytes` (1,048,576 for
+   a 1 MiB dump).
+2. `begin_gb_rom_upload(filename, total_bytes, sha256, email?)` →
+   `{upload_id, chunk_size}`. Default `chunk_size` is 24 KiB decoded
+   (~32 KiB base64). Override with `GB_ROM_UPLOAD_CHUNK_BYTES`.
+3. Split the file into consecutive slices of at most `chunk_size` bytes.
+   For each slice `i = 0, 1, …` call
+   `append_gb_rom_upload(upload_id, i, chunk_base64)`. Holes, oversized
+   chunks, and `received_bytes > total_bytes` are rejected.
+4. `finalize_gb_rom_upload(upload_id, filename?, email?, boot?)` concatenates
+   the staging files under `roms/.uploads/<upload_id>/` (mode `0700`),
+   verifies sha256 and length, then runs the **same** isolated validator
+   (`container up first`, ROM bytes on stdin `docker exec`, `--network=none`).
+   On success the ROM is persisted under `roms/<32-hex>/` and mapped/booted
+   like `submit_gb_rom`. Staging is always deleted. Abandoned uploads expire
+   after 30 minutes.
+
+`submit_gb_rom` remains the right tool for small homebrew that fits in one
+argument.
 
 ## Resources (read-only)
 
@@ -339,8 +375,9 @@ cp .env.example .env
 ## Environment
 
 See `.env.example`. Python reads `GB_MCP_*`, `GB_ROM_VALIDATOR_IMAGE`,
-`GB_PYBOY_INSTANCE_IMAGE`, and `GB_ROMS_HOST_PATH`. `TUNNEL_TOKEN` and
-`TUNNEL_HOSTNAME` are for Cloudflare / compose only.
+`GB_PYBOY_INSTANCE_IMAGE`, `GB_ROMS_HOST_PATH`, `GB_ROM_UPLOAD_CHUNK_BYTES`,
+and `GB_ROM_ALLOW_UNKNOWN_SIZE`. `TUNNEL_TOKEN` and `TUNNEL_HOSTNAME` are
+for Cloudflare / compose only.
 
 ## Tests
 

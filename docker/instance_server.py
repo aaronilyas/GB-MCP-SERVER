@@ -28,6 +28,7 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     INPUT_COMMAND_TIMEOUT_SECONDS,
 )
+from gb_mcp.gb.header import inspect_rom_playable
 
 LISTEN_HOST = "127.0.0.1"
 LISTEN_PORT = int(os.environ.get("GB_INSTANCE_PORT", "8080"))
@@ -82,7 +83,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/input":
             payload = dict(body)
-            payload.setdefault("steps", [])
+            if not payload.get("steps"):
+                payload.pop("steps", None)
             if not payload.get("screenshot_mode"):
                 payload["screenshot_mode"] = "final"
             try:
@@ -160,6 +162,29 @@ def _exit_code(reason: str | None) -> int:
     return 0
 
 
+def _short_exception(exc: BaseException) -> str:
+    text = str(exc).strip() or type(exc).__name__
+    return text.splitlines()[0][:160]
+
+
+def _boot_failure_payload(rom: Path, exc: BaseException | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    try:
+        info = inspect_rom_playable(rom)
+        payload["rom_bytes"] = info.get("size_bytes")
+        payload["expected_rom_bytes"] = info.get("expected_rom_bytes")
+        if not info.get("playable") and info.get("unplayable_reason"):
+            payload["error"] = info["unplayable_reason"]
+            return payload
+    except Exception:
+        pass
+    if exc is not None:
+        payload["error"] = f"PyBoy failed to boot: {_short_exception(exc)}"
+    else:
+        payload["error"] = "PyBoy failed to boot"
+    return payload
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if args[:1] == ["rpc"]:
@@ -170,6 +195,10 @@ def main(argv: list[str] | None = None) -> int:
     rom = Path(os.environ.get("GB_INSTANCE_ROM", ""))
     if not rom.is_file():
         print(json.dumps({"error": "ROM path is missing"}), file=sys.stderr)
+        return 1
+    playability = inspect_rom_playable(rom)
+    if not playability.get("playable"):
+        print(json.dumps(_boot_failure_payload(rom)), file=sys.stderr)
         return 1
     subdirectory = os.environ.get("GB_INSTANCE_SUBDIRECTORY", "local")
     idle = float(
@@ -192,7 +221,8 @@ def main(argv: list[str] | None = None) -> int:
     session.start()
     try:
         session.wait_ready(timeout=30)
-    except Exception:
+    except Exception as exc:
+        print(json.dumps(_boot_failure_payload(rom, exc)), file=sys.stderr)
         return 1
     STATE.ready = True
 

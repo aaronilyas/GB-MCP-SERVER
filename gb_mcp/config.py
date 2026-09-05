@@ -9,6 +9,10 @@ from pathlib import Path
 
 from gb_mcp.gb.constants import MAX_ROM_BYTES
 
+# Decoded bytes per append_gb_rom_upload chunk (~32 KiB base64 at 24 KiB).
+DEFAULT_ROM_UPLOAD_CHUNK_BYTES = 24 * 1024
+ROM_UPLOAD_TTL_SECONDS = 30 * 60
+
 ROOT = Path(__file__).resolve().parent.parent
 ROMS_DIR = ROOT / "roms"
 DOCKER_IMAGE = os.environ.get("GB_ROM_VALIDATOR_IMAGE", "gb-rom-validator:latest")
@@ -21,6 +25,24 @@ IDLE_TIMEOUT_SECONDS = int(os.environ.get("GB_PYBOY_IDLE_TIMEOUT_SECONDS", "2700
 # Session-start emulation speed (0 = uncapped). Play instances also read this env.
 EMULATION_SPEED = int(os.environ.get("GB_PYBOY_EMULATION_SPEED", "0"))
 PYBOY_WINDOW = os.environ.get("GB_PYBOY_WINDOW", "null")
+
+
+def rom_upload_chunk_bytes() -> int:
+    """Decoded bytes per chunked-upload append. Env ``GB_ROM_UPLOAD_CHUNK_BYTES``."""
+    raw = os.environ.get("GB_ROM_UPLOAD_CHUNK_BYTES", "").strip()
+    if not raw:
+        value = DEFAULT_ROM_UPLOAD_CHUNK_BYTES
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = DEFAULT_ROM_UPLOAD_CHUNK_BYTES
+    return max(1024, min(value, MAX_ROM_BYTES))
+
+
+def rom_uploads_dir() -> Path:
+    """Staging directory for chunked ROM ingest (outside roms/<32-hex>/)."""
+    return ROMS_DIR / ".uploads"
 
 
 def roms_host_path() -> Path:

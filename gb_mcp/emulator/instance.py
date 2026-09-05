@@ -24,6 +24,7 @@ from gb_mcp.emulator.backend import (
     _dead_message,
     play_container_name,
 )
+from gb_mcp.gb.header import assert_rom_playable
 from gb_mcp.emulator.loop import (
     _state_path_for_rom,
     overlay_status,
@@ -48,6 +49,11 @@ class DockerInstanceBackend:
         idle_timeout_seconds: float,
         emulation_speed: int = DEFAULT_EMULATION_SPEED,
     ) -> InstanceHandle:
+        try:
+            assert_rom_playable(rom_path)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from None
+
         name = play_container_name(subdirectory)
         if _container_running(name):
             return InstanceHandle(
@@ -105,7 +111,9 @@ class DockerInstanceBackend:
     ) -> dict[str, Any]:
         if not _container_running(handle.container_name):
             raise InstanceDeadError(_dead_message(_exit_close_reason(handle.container_name)))
-        body = {"steps": steps, "screenshot_mode": screenshot_mode, **extra}
+        body = {"screenshot_mode": screenshot_mode, **extra}
+        if steps:
+            body["steps"] = steps
         remote = _rpc(
             handle.container_name,
             "POST",
@@ -328,7 +336,7 @@ def _wait_ready(name: str, timeout: float = 30) -> None:
             return
         time.sleep(0.15)
     if last_dead or not _container_running(name):
-        raise InstanceDeadError("Play instance exited before it became ready")
+        raise InstanceDeadError(_ready_failure_message(name))
     raise RuntimeError("Play instance failed to start")
 
 
@@ -377,7 +385,7 @@ def _container_exists(name: str) -> bool:
     return result.returncode == 0
 
 
-def _exit_close_reason(name: str) -> str | None:
+def _container_exit_code(name: str) -> int | None:
     result = isolation._run_docker(
         ["inspect", "-f", "{{.State.ExitCode}}", name],
         timeout=15,
@@ -386,14 +394,84 @@ def _exit_close_reason(name: str) -> str | None:
         return None
     raw = result.stdout.decode().strip()
     try:
-        code = int(raw)
+        return int(raw)
     except ValueError:
-        return "error"
+        return None
+
+
+def _exit_close_reason(name: str) -> str | None:
+    code = _container_exit_code(name)
+    if code is None:
+        return None
     if code == 0:
         return "idle_timeout"
     if code == 2:
         return "requested"
     return "error"
+
+
+def _extract_json_error(text: str) -> str | None:
+    """Return a short reason from the last JSON ``{"error": ...}`` line.
+
+    Ignores docker daemon dumps and stack traces. Tool responses must stay
+    screenshot-only and must not include raw docker logs.
+    """
+    if not text:
+        return None
+    for line in reversed(text.splitlines()):
+        stripped = line.strip()
+        if "Error response from daemon" in stripped:
+            continue
+        if not stripped.startswith("{"):
+            continue
+        try:
+            payload = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or not payload.get("error"):
+            continue
+        error = str(payload["error"]).strip().splitlines()[0][:160]
+        rom_bytes = payload.get("rom_bytes")
+        expected = payload.get("expected_rom_bytes")
+        if rom_bytes is not None and expected is not None:
+            return f"{error} (rom_bytes={rom_bytes}, expected_rom_bytes={expected})"
+        return error
+    return None
+
+
+def _boot_log_reason(name: str) -> str | None:
+    result = isolation._run_docker(["logs", "--tail", "40", name], timeout=15)
+    combined = (
+        result.stderr.decode(errors="replace")
+        + "\n"
+        + result.stdout.decode(errors="replace")
+    )
+    if "Error response from daemon" in combined and "{" not in combined:
+        return None
+    return _extract_json_error(combined)
+
+
+def _sanitized_boot_reason(name: str) -> str:
+    parts: list[str] = []
+    code = _container_exit_code(name)
+    if code is not None:
+        parts.append(f"exit {code}")
+    log_reason = _boot_log_reason(name)
+    if log_reason:
+        parts.append(log_reason)
+    text = "; ".join(parts)
+    if "\n" in text or len(text) > 180:
+        text = "; ".join(parts[:1] + ([log_reason[:120]] if log_reason else []))
+        text = text.splitlines()[0][:180]
+    return text
+
+
+def _ready_failure_message(name: str) -> str:
+    prefix = "Play instance exited before it became ready"
+    detail = _sanitized_boot_reason(name)
+    if not detail:
+        return prefix
+    return f"{prefix}: {detail}"
 
 
 def _rm(name: str) -> None:

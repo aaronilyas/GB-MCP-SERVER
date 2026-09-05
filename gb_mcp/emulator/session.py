@@ -276,7 +276,7 @@ class SessionManager:
                     "running": False,
                     "email": email,
                     "subdirectory": subdirectory,
-                    "error": str(exc),
+                    "error": f"failed to start PyBoy: {exc}",
                 }
             except Exception as exc:  # noqa: BLE001
                 return {

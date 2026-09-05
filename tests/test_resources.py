@@ -10,6 +10,9 @@ from rom_builder import make_rom
 
 _TOOL_NAMES = (
     "submit_gb_rom",
+    "begin_gb_rom_upload",
+    "append_gb_rom_upload",
+    "finalize_gb_rom_upload",
     "map_subdirectory_to_email",
     "list_subdirectories_for_email",
     "load_subdirectory_rom",

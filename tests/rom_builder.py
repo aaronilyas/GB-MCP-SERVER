@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from gb_mcp.gb.constants import NINTENDO_LOGO
+from gb_mcp.gb.constants import NINTENDO_LOGO, ROM_SIZE_BYTES
 
 
 def make_rom(
     *,
-    size: int = 0x150,
+    size: int | None = None,
     title: bytes = b"TESTGAME",
     cgb_flag: int = 0x00,
     sgb_flag: int = 0x00,
@@ -22,6 +22,8 @@ def make_rom(
     fix_checksum: bool = True,
     checksum: int | None = None,
 ) -> bytes:
+    if size is None:
+        size = ROM_SIZE_BYTES.get(rom_size_code, 32 * 1024)
     data = bytearray(size)
     if include_logo and size >= 0x134:
         data[0x104:0x134] = NINTENDO_LOGO
