@@ -91,6 +91,7 @@ class FakePyBoy:
         self.saved_ram = False
         self.speed: int | None = None
         self.loaded_state: bytes | None = None
+        self.load_state_error: BaseException | None = None
         self.screen = FakeScreen(self)
         self._pressed: set[str] = set()
         self._releases: list[list[object]] = []
@@ -117,6 +118,8 @@ class FakePyBoy:
         fh.write(b"FAKESTATE")
 
     def load_state(self, fh) -> None:
+        if self.load_state_error is not None:
+            raise self.load_state_error
         self.loaded_state = fh.read()
 
     def tick(self, count: int = 1, render: bool = True, sound: bool = True) -> bool:
@@ -135,6 +138,12 @@ class FakePyBoy:
 
     def stop(self, save: bool = True, ram_file=None, rtc_file=None) -> None:
         self.saved_ram = bool(save)
+        if save:
+            payload = b"FAKERAM"
+            if ram_file is not None:
+                ram_file.write(payload)
+            else:
+                Path(self.gamerom + ".ram").write_bytes(payload)
         self.stopped = True
         self._dead.set()
 

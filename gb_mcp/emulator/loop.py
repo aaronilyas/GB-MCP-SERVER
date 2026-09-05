@@ -38,10 +38,27 @@ REMOTE_STATUS_KEYS = (
     "emulation_speed",
 )
 
+# Frames to run after a successful load_state so LCD/PPU leave a mid-frame
+# snapshot. Poisoned restores present as stairs/doors not warping and the
+# camera scrolling out of bounds.
+POST_RESTORE_SETTLE_FRAMES = 8
+
 
 def _state_path_for_rom(rom_path: Path) -> Path:
-    """Return the PyBoy save-state path stored next to the ROM (`rom.gb.state`)."""
+    """Return the PyBoy snapshot path stored next to the ROM (`rom.gb.state`).
+
+    This is ``save_state`` / ``load_state`` output used to resume a session,
+    not cartridge battery SRAM.
+    """
     return Path(str(rom_path) + ".state")
+
+
+def _ram_path_for_rom(rom_path: Path) -> Path:
+    """Return the PyBoy cartridge SRAM path stored next to the ROM (`rom.gb.ram`).
+
+    Stock PyBoy writes this from ``stop(save=True)``.
+    """
+    return Path(str(rom_path) + ".ram")
 
 
 def shape_status(
@@ -93,12 +110,12 @@ def _default_pyboy_factory(rom_path: Path) -> Any:
     )
 
 
-def _atomic_write_state(pyboy: Any, dest: Path) -> None:
+def _atomic_write_file(dest: Path, write: Callable[[Any], None], *, prefix: str) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=".state-", suffix=".tmp", dir=dest.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=".tmp", dir=dest.parent)
     try:
         with os.fdopen(fd, "wb") as tmp:
-            pyboy.save_state(tmp)
+            write(tmp)
             tmp.flush()
             os.fsync(tmp.fileno())
         os.replace(tmp_name, dest)
@@ -108,6 +125,10 @@ def _atomic_write_state(pyboy: Any, dest: Path) -> None:
         except OSError:
             pass
         raise
+
+
+def _atomic_write_state(pyboy: Any, dest: Path) -> None:
+    _atomic_write_file(dest, pyboy.save_state, prefix=".state-")
 
 
 class _Command:
@@ -268,7 +289,16 @@ class EmulatorSession:
         }
 
     def _apply_save(self) -> dict[str, Any]:
-        self._save()
+        """Persist the PyBoy snapshot at ``rom.gb.state`` without stopping.
+
+        That file is ``save_state`` output for session resume, not cartridge
+        battery. Stock PyBoy only writes SRAM in ``stop(save=True)``, which
+        would end this session; idle and stop still snapshot then
+        ``stop(save=True)``. If a live ``save_ram`` exists, SRAM is written
+        to ``rom.gb.ram`` as well.
+        """
+        self._save_snapshot()
+        self._try_save_cartridge_sram()
         return {"saved": True}
 
     def _apply_input(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -305,18 +335,58 @@ class EmulatorSession:
             cleaned["pngs"] = pngs
         return cleaned
 
-    def _save(self) -> None:
+    def _save_snapshot(self) -> None:
         pyboy = self._pyboy
         if pyboy is None:
             return
         _atomic_write_state(pyboy, self.state_path)
         self.saved = True
 
+    def _try_save_cartridge_sram(self) -> None:
+        """Write cartridge SRAM without stopping, if PyBoy exposes a live dump."""
+        pyboy = self._pyboy
+        if pyboy is None:
+            return
+        save_ram = getattr(pyboy, "save_ram", None)
+        if not callable(save_ram):
+            return
+        dest = _ram_path_for_rom(self.rom_path)
+        try:
+            _atomic_write_file(dest, save_ram, prefix=".ram-")
+        except Exception:  # noqa: BLE001
+            return
+
+    def _release_all_buttons(self, pyboy: Any) -> None:
+        release = getattr(pyboy, "button_release", None)
+        if not callable(release):
+            return
+        for name in BUTTONS:
+            try:
+                release(name)
+            except Exception:  # noqa: BLE001
+                continue
+
+    def _restore_snapshot(self, pyboy: Any) -> None:
+        if not (self.state_path.is_file() and self.state_path.stat().st_size > 0):
+            return
+        try:
+            with self.state_path.open("rb") as fh:
+                pyboy.load_state(fh)
+        except Exception as exc:  # noqa: BLE001
+            self.restore_error = str(exc)
+            self.restored_state = False
+            return
+        self._release_all_buttons(pyboy)
+        pyboy.tick(POST_RESTORE_SETTLE_FRAMES, render=True)
+        self.restored_state = True
+
     def _close_pyboy(self) -> None:
         pyboy = self._pyboy
         if pyboy is None:
             return
         try:
+            # Cartridge SRAM (`rom.gb.ram`) is flushed here. The sibling
+            # `.state` file is the PyBoy snapshot from `_save_snapshot`.
             pyboy.stop(save=True)
         finally:
             self._pyboy = None
@@ -332,13 +402,7 @@ class EmulatorSession:
             self.cartridge_title = title or None
             if hasattr(pyboy, "set_emulation_speed"):
                 pyboy.set_emulation_speed(self._emulation_speed)
-            if self.state_path.is_file() and self.state_path.stat().st_size > 0:
-                try:
-                    with self.state_path.open("rb") as fh:
-                        pyboy.load_state(fh)
-                    self.restored_state = True
-                except Exception as exc:  # noqa: BLE001
-                    self.restore_error = str(exc)
+            self._restore_snapshot(pyboy)
             self._last_input_at = time.monotonic()
             self._ready.set()
 
@@ -360,7 +424,7 @@ class EmulatorSession:
                 self._cmd_available.wait(timeout=remaining)
 
             try:
-                self._save()
+                self._save_snapshot()
             finally:
                 self._close_pyboy()
         except Exception as exc:  # noqa: BLE001

@@ -14,6 +14,7 @@ from gb_mcp.emulator.loop import (
     EmulatorSession,
     PyBoyFactory,
     _default_pyboy_factory,
+    _ram_path_for_rom,
     _state_path_for_rom,
 )
 from gb_mcp.emulator.play_limits import (
@@ -52,6 +53,7 @@ class InstanceHandle:
         self.session = session
         self.reused = reused
         self.state_path = _state_path_for_rom(rom_path)
+        self.ram_path = _ram_path_for_rom(rom_path)
 
 
 class InstanceBackend(Protocol):

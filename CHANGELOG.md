@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased] — 2026-09-04
+## [Unreleased] — 2026-09-05
+
+### Snapshot vs cartridge battery
+
+- `rom.gb.state` is a PyBoy `save_state` snapshot used to resume a session, not cartridge battery. Stop and idle still write that snapshot, then `pyboy.stop(save=True)` flushes SRAM (`rom.gb.ram`). `save_battery` cannot dump SRAM without stopping: PyBoy's public battery API is `stop(save=True)`. A failed `load_state` sets `restore_error`, leaves `restored_state=false`, and cold-boots. A successful restore ticks 8 frames with buttons released before the session is ready.
 
 ### Session email from OAuth
 
