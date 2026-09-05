@@ -8,6 +8,9 @@ from typing import Any, NamedTuple
 from gb_mcp.emulator.input_schema import PlayInput
 from gb_mcp.emulator.play_limits import MAX_FRAMES_PER_CALL
 
+# tick(n, render=False) can skip LCD work Gen 1 map scripts need.
+_MAX_TICK_WITHOUT_RENDER = 4
+
 
 class _Phase(NamedTuple):
     buttons: tuple[str, ...]
@@ -53,10 +56,11 @@ def run_play_input(
     final_recorded = False
     phase_idx = 0
     phase_progress = 0
+    chord_changed = False
 
     try:
         if phases:
-            _set_buttons(pyboy, pressed, phases[0].buttons)
+            chord_changed = _set_buttons(pyboy, pressed, phases[0].buttons)
             _maybe_report_step(steps_out, phases[0])
 
         while frames_advanced < total_frames:
@@ -91,7 +95,13 @@ def run_play_input(
             )
             need_render = need_eval or want or is_last or step_shot
 
-            _tick_chunk(pyboy, chunk, render_last=need_render)
+            _tick_chunk(
+                pyboy,
+                chunk,
+                render_last=need_render,
+                render_first=chord_changed,
+            )
+            chord_changed = False
             frames_advanced = end
             phase_progress += chunk
 
@@ -134,7 +144,9 @@ def run_play_input(
                 phase_idx += 1
                 phase_progress = 0
                 if phase_idx < len(phases) and frames_advanced < total_frames:
-                    _set_buttons(pyboy, pressed, phases[phase_idx].buttons)
+                    chord_changed = _set_buttons(
+                        pyboy, pressed, phases[phase_idx].buttons
+                    )
                     _maybe_report_step(steps_out, phases[phase_idx])
     finally:
         _release_all(pyboy, pressed)
@@ -222,17 +234,37 @@ def _next_eval_frame(current: int, interval: int, total: int) -> int:
     return nxt
 
 
-def _tick_chunk(pyboy: Any, count: int, *, render_last: bool) -> None:
+def _tick_chunk(
+    pyboy: Any,
+    count: int,
+    *,
+    render_last: bool,
+    render_first: bool = False,
+) -> None:
     if count <= 0:
         return
-    # PyBoy only renders the last frame of tick(n, render=True); split so
-    # intermediate frames stay render=False.
+    # A new button chord needs tick(1, render=True) before any render=False
+    # batch so LCD/PPU run (Gen 1 warps/collision). PyBoy only draws the last
+    # frame of tick(n, render=True); capture / until-eval still render last.
+    if render_first:
+        _tick_or_die(pyboy, 1, True)
+        count -= 1
+        if count == 0:
+            return
     if render_last:
         if count > 1:
-            _tick_or_die(pyboy, count - 1, False)
+            _tick_without_render(pyboy, count - 1)
         _tick_or_die(pyboy, 1, True)
     else:
-        _tick_or_die(pyboy, count, False)
+        _tick_without_render(pyboy, count)
+
+
+def _tick_without_render(pyboy: Any, count: int) -> None:
+    remaining = count
+    while remaining > 0:
+        n = min(_MAX_TICK_WITHOUT_RENDER, remaining)
+        _tick_or_die(pyboy, n, False)
+        remaining -= n
 
 
 def _tick_or_die(pyboy: Any, count: int, render: bool) -> None:
@@ -241,10 +273,10 @@ def _tick_or_die(pyboy: Any, count: int, render: bool) -> None:
         raise RuntimeError("PyBoy session stopped while applying input")
 
 
-def _set_buttons(pyboy: Any, pressed: set[str], desired: tuple[str, ...]) -> None:
+def _set_buttons(pyboy: Any, pressed: set[str], desired: tuple[str, ...]) -> bool:
     want = set(desired)
     if want == pressed:
-        return
+        return False
     # Different chord: drop everything, then press the new set.
     _release_all(pyboy, pressed)
     for name in desired:
@@ -252,6 +284,7 @@ def _set_buttons(pyboy: Any, pressed: set[str], desired: tuple[str, ...]) -> Non
             continue
         pyboy.button_press(name)
         pressed.add(name)
+    return True
 
 
 def _release_all(pyboy: Any, pressed: set[str]) -> None:

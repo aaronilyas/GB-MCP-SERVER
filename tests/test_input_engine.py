@@ -183,12 +183,103 @@ def test_render_only_on_capture_or_until_eval() -> None:
     )
     result = _run(pyboy, play)
     assert result["frames_advanced"] == 80
-    assert any(count > 1 for count in pyboy.tick_calls)
+    paired = list(zip(pyboy.tick_calls, pyboy.tick_renders, strict=True))
+    # Chord change and capture/until-eval frames tick(1, True); extra Trues
+    # are OK. Intermediate work still batches render=False with n>1.
+    assert any(count > 1 and render is False for count, render in paired)
     false_renders = pyboy.tick_renders.count(False)
     true_renders = pyboy.tick_renders.count(True)
     assert false_renders >= 10
     assert true_renders >= 1
+    assert all(count <= 4 for count, render in paired if render is False)
+    assert pyboy.tick_calls[0] == 1
+    assert pyboy.tick_renders[0] is True
     assert pyboy.buttons == []
+
+
+def test_unrendered_tick_calls_capped_at_four() -> None:
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 30,
+            "until_eval_interval": 15,
+            "disable_default_hold_abort": True,
+        }
+    )
+    result = _run(pyboy, play)
+    assert result["frames_advanced"] == 30
+    paired = list(zip(pyboy.tick_calls, pyboy.tick_renders, strict=True))
+    assert any(count > 1 and render is False for count, render in paired)
+    assert all(count <= 4 for count, render in paired if render is False)
+    assert sum(count for count, _render in paired) == 30
+
+
+def test_chord_change_renders_before_false_batch() -> None:
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    events: list[tuple[str, object, object]] = []
+    orig_press = pyboy.button_press
+    orig_tick = pyboy.tick
+
+    def press(name: str) -> None:
+        events.append(("press", name, None))
+        orig_press(name)
+
+    def tick(count: int = 1, render: bool = True, sound: bool = True) -> bool:
+        events.append(("tick", count, render))
+        return orig_tick(count, render, sound)
+
+    pyboy.button_press = press  # type: ignore[method-assign]
+    pyboy.tick = tick  # type: ignore[method-assign]
+    play = parse_play_input(
+        {
+            "steps": [
+                {"buttons": ["up"], "hold_frames": 8, "gap_frames": 0},
+                {"buttons": ["a"], "hold_frames": 8, "gap_frames": 0},
+            ],
+            "until_eval_interval": 4,
+        }
+    )
+    result = _run(pyboy, play)
+    assert result["frames_advanced"] == 16
+    assert pyboy._pressed == set()
+
+    presses = [i for i, event in enumerate(events) if event[0] == "press"]
+    assert len(presses) == 2
+    for index in presses:
+        tick_event = next(event for event in events[index + 1 :] if event[0] == "tick")
+        assert tick_event == ("tick", 1, True)
+
+
+def test_same_chord_does_not_prime_extra_render() -> None:
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    play = parse_play_input(
+        {
+            "steps": [
+                {"buttons": ["up"], "hold_frames": 8, "gap_frames": 0},
+                {"buttons": ["up"], "hold_frames": 8, "gap_frames": 0},
+            ],
+            "until_eval_interval": 4,
+            "disable_default_hold_abort": True,
+        }
+    )
+    result = _run(pyboy, play)
+    assert result["frames_advanced"] == 16
+    paired = list(zip(pyboy.tick_calls, pyboy.tick_renders, strict=True))
+    # One chord (up held across both steps): prime once, then eval boundaries.
+    assert paired == [
+        (1, True),
+        (2, False),
+        (1, True),
+        (3, False),
+        (1, True),
+        (3, False),
+        (1, True),
+        (3, False),
+        (1, True),
+    ]
+    assert pyboy.presses.count("up") == 1
 
 
 def test_call_timeout_releases_buttons() -> None:
