@@ -208,21 +208,69 @@ def _validate_chunk_index(chunk_index: int, *, name: str = "chunk_index") -> int
     return chunk_index
 
 
-def _decode_chunk(chunk_base64: str, chunk_size: int) -> bytes:
+def _max_b64_len(chunk_size: int) -> int:
+    return (chunk_size + 2) // 3 * 4 + 16
+
+
+def _oversized_chunk_detail(
+    *,
+    b64_len: int,
+    max_b64: int,
+    decoded_len: int | None,
+    chunk_size: int,
+    next_index: int,
+    received_bytes: int,
+) -> str:
+    decoded_repr = "unknown" if decoded_len is None else decoded_len
+    return (
+        f"b64_len={b64_len}, max_b64={max_b64}, decoded_len={decoded_repr}, "
+        f"chunk_size={chunk_size}, next_index={next_index}, "
+        f"received_bytes={received_bytes}"
+    )
+
+
+def _decode_chunk(
+    chunk_base64: str,
+    chunk_size: int,
+    *,
+    next_index: int,
+    received_bytes: int,
+) -> bytes:
     if not isinstance(chunk_base64, str) or not chunk_base64:
         raise ValueError("chunk_base64 is required")
-    max_b64 = (chunk_size + 2) // 3 * 4 + 16
-    if len(chunk_base64) > max_b64:
-        raise ValueError("chunk exceeds the configured chunk_size")
+    b64_len = len(chunk_base64)
+    max_b64 = _max_b64_len(chunk_size)
+    if b64_len > max_b64:
+        detail = _oversized_chunk_detail(
+            b64_len=b64_len,
+            max_b64=max_b64,
+            decoded_len=None,
+            chunk_size=chunk_size,
+            next_index=next_index,
+            received_bytes=received_bytes,
+        )
+        raise ValueError(
+            f"chunk exceeds the configured chunk_size ({detail})"
+        )
     try:
         data = base64.b64decode(chunk_base64, validate=True)
     except Exception as exc:  # noqa: BLE001
         raise ValueError(f"invalid base64 chunk: {exc}") from None
     if not data:
         raise ValueError("chunk is empty")
-    if len(data) > chunk_size:
+    decoded_len = len(data)
+    if decoded_len > chunk_size:
+        detail = _oversized_chunk_detail(
+            b64_len=b64_len,
+            max_b64=max_b64,
+            decoded_len=decoded_len,
+            chunk_size=chunk_size,
+            next_index=next_index,
+            received_bytes=received_bytes,
+        )
         raise ValueError(
-            f"chunk is {len(data)} bytes; maximum is {chunk_size} decoded bytes"
+            f"chunk is {decoded_len} bytes; maximum is {chunk_size} decoded bytes "
+            f"({detail})"
         )
     return data
 
@@ -284,9 +332,14 @@ def append_chunk(
     with _LOCK:
         expire_uploads()
         dest, meta = _load_live(upload_id)
-        data = _decode_chunk(chunk_base64, int(meta["chunk_size"]))
         expected_index = int(meta["next_index"])
         received_bytes = int(meta["received_bytes"])
+        data = _decode_chunk(
+            chunk_base64,
+            int(meta["chunk_size"]),
+            next_index=expected_index,
+            received_bytes=received_bytes,
+        )
         if chunk_index == expected_index - 1 and len(data) <= received_bytes:
             data_path = dest / "data.bin"
             with data_path.open("rb") as fh:
@@ -331,11 +384,18 @@ def append_chunks(
         expire_uploads()
         dest, meta = _load_live(upload_id)
         chunk_size = int(meta["chunk_size"])
+        next_index = int(meta["next_index"])
+        received_bytes = int(meta["received_bytes"])
         max_batch_bytes = config.ROM_UPLOAD_BATCH_MAX_BYTES
         decoded: list[bytes] = []
         total_decoded = 0
         for item in chunks_base64:
-            data = _decode_chunk(item, chunk_size)
+            data = _decode_chunk(
+                item,
+                chunk_size,
+                next_index=next_index,
+                received_bytes=received_bytes,
+            )
             total_decoded += len(data)
             if total_decoded > max_batch_bytes:
                 raise ValueError(

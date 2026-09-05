@@ -402,10 +402,43 @@ def test_oversized_chunk_rejected(isolated_db, roms_dir: Path) -> None:
     rom = make_rom()
     digest = hashlib.sha256(rom).hexdigest()
     begun = server.begin_gb_rom_upload("game.gb", len(rom), digest)
-    too_big = _b64(b"\x00" * (begun["chunk_size"] + 1))
-    result = server.append_gb_rom_upload(begun["upload_id"], 0, too_big)
+    chunk_size = begun["chunk_size"]
+    upload_id = begun["upload_id"]
+    max_b64 = (chunk_size + 2) // 3 * 4 + 16
+
+    too_big = _b64(b"\x00" * (chunk_size + 1))
+    result = server.append_gb_rom_upload(upload_id, 0, too_big)
     assert result["appended"] is False
-    assert "chunk" in result["error"]
+    err = result["error"]
+    assert "chunk" in err
+    assert f"b64_len={len(too_big)}" in err
+    assert f"max_b64={max_b64}" in err
+    assert f"decoded_len={chunk_size + 1}" in err
+    assert f"chunk_size={chunk_size}" in err
+    assert "next_index=0" in err
+    assert "received_bytes=0" in err
+
+    b64_too_long = "A" * (max_b64 + 1)
+    result = server.append_gb_rom_upload(upload_id, 0, b64_too_long)
+    assert result["appended"] is False
+    err = result["error"]
+    assert "chunk exceeds the configured chunk_size" in err
+    assert f"b64_len={len(b64_too_long)}" in err
+    assert f"max_b64={max_b64}" in err
+    assert "decoded_len=unknown" in err
+    assert f"chunk_size={chunk_size}" in err
+    assert "next_index=0" in err
+    assert "received_bytes=0" in err
+
+    first = rom[:chunk_size]
+    ok = server.append_gb_rom_upload(upload_id, 0, _b64(first))
+    assert ok["appended"] is True
+    result = server.append_gb_rom_upload(upload_id, 1, too_big)
+    assert result["appended"] is False
+    err = result["error"]
+    assert f"decoded_len={chunk_size + 1}" in err
+    assert "next_index=1" in err
+    assert f"received_bytes={len(first)}" in err
 
 
 def test_expired_upload_rejected(
