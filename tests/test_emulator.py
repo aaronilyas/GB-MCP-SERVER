@@ -444,6 +444,39 @@ def test_input_after_backend_marks_instance_dead(
         manager.shutdown()
 
 
+def test_status_rpc_timeout_does_not_reap_live_instance(
+    isolated_db, roms_dir: Path
+) -> None:
+    """A hung docker exec /status must not docker-rm a running play instance."""
+
+    class FlakyStatusBackend(FakeInstanceBackend):
+        def __init__(self, pyboy_factory):
+            super().__init__(pyboy_factory)
+            self.reaped: list[object] = []
+
+        def status(self, handle):  # noqa: ARG002
+            raise RuntimeError("Play instance failed to handle the request")
+
+        def reap(self, handle) -> None:
+            self.reaped.append(handle)
+
+    backend = FlakyStatusBackend(FakePyBoy)
+    manager = SessionManager(backend=backend, idle_timeout_seconds=2700)
+    try:
+        name, rom_path = _write_mapped_rom(roms_dir)
+        loaded = manager.load("owner@example.com", name, rom_path)
+        assert loaded["running"] is True
+        assert loaded.get("error") == "Play instance status is temporarily unavailable"
+        session = manager.get("owner@example.com")
+        assert session is not None
+        assert session.is_running is True
+        assert backend.reaped == []
+        sent = manager.send_input("owner@example.com", name, ["a"])
+        assert sent["sent"] is True
+    finally:
+        manager.shutdown()
+
+
 def _docker_image_present(name: str) -> bool:
     try:
         probe = subprocess.run(

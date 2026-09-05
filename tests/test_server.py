@@ -153,6 +153,66 @@ def test_submit_header_only_pokemon_rejected(
     assert hex_dirs == []
 
 
+def test_submit_rejects_stub_even_if_stale_validator_says_valid(
+    fake_docker, isolated_db, roms_dir: Path
+) -> None:
+    """Old validator images returned valid:true + size_note for 512-byte headers."""
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, _data: {
+            "valid": True,
+            "reason": "valid Game Boy ROM header",
+            "title": "POKEMON RED",
+            "size_bytes": 512,
+            "cgb": False,
+            "rom_size_code": 5,
+            "size_note": "size 512 != header expectation 1048576",
+            "header_checksum": "0x20",
+        },
+    )
+    rom = make_rom(size=512, title=b"POKEMON RED", rom_size_code=0x05)
+    result = server.submit_gb_rom(_b64(rom), filename="header-only.gb")
+    assert result["accepted"] is False
+    assert result["saved"] is False
+    assert result["mapped"] is False
+    validation = result["validation"]
+    assert validation["valid"] is False
+    assert "512" in validation["reason"]
+    assert "1048576" in validation["reason"]
+    assert validation.get("size_note") is None
+    hex_dirs = [p for p in roms_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    assert hex_dirs == []
+
+
+@pytest.mark.parametrize("size", [512, 8192])
+def test_submit_pokemon_header_slices_rejected(
+    fake_docker, isolated_db, roms_dir: Path, validator_module, size: int
+) -> None:
+    """Incident JSON must not return valid:true for 512/8192-byte POKEMON RED slices."""
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, data: validator_module.validate_gb_rom_bytes(data),
+    )
+    rom = make_rom(size=size, title=b"POKEMON RED", rom_size_code=0x05)
+    result = server.submit_gb_rom(_b64(rom), filename="header-only.gb")
+    assert result["accepted"] is False
+    assert result["saved"] is False
+    assert result["mapped"] is False
+    assert result["path"] is None
+    assert result["subdirectory"] is None
+    validation = result["validation"]
+    assert validation["valid"] is False
+    assert "truncated" in validation["reason"]
+    assert str(size) in validation["reason"]
+    assert "1048576" in validation["reason"]
+    assert "0x05" in validation["reason"]
+    assert validation.get("size_note") is None
+    hex_dirs = [p for p in roms_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+    assert hex_dirs == []
+
+
 def test_submit_rejects_invalid_rom(fake_docker, isolated_db, roms_dir: Path) -> None:
     fake_docker.setattr(
         server,

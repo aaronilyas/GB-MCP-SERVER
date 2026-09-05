@@ -60,7 +60,8 @@ class PlaySession:
         try:
             running = self._backend.is_running(self._handle)
         except Exception:
-            running = False
+            # Inspect flake: do not reap a container we cannot query.
+            return True
         if not running:
             self._mark_dead()
         return running
@@ -124,19 +125,34 @@ class PlaySession:
         try:
             payload = self._backend.status(self._handle)
         except Exception as exc:
-            self._mark_dead()
-            error = (
-                str(exc)
-                if isinstance(exc, InstanceDeadError)
-                else "Play instance is no longer running"
-            )
-            payload = {
-                "email": self.email,
-                "subdirectory": self.subdirectory,
-                "rom": self.rom_path.name,
-                "running": False,
-                "error": error,
-            }
+            still_up = False
+            try:
+                still_up = self._backend.is_running(self._handle)
+            except Exception:
+                still_up = False
+            if still_up:
+                # A hung docker exec must not reap a live play instance.
+                payload = {
+                    "email": self.email,
+                    "subdirectory": self.subdirectory,
+                    "rom": self.rom_path.name,
+                    "running": True,
+                    "error": "Play instance status is temporarily unavailable",
+                }
+            else:
+                self._mark_dead()
+                error = (
+                    str(exc)
+                    if isinstance(exc, InstanceDeadError)
+                    else "Play instance is no longer running"
+                )
+                payload = {
+                    "email": self.email,
+                    "subdirectory": self.subdirectory,
+                    "rom": self.rom_path.name,
+                    "running": False,
+                    "error": error,
+                }
         payload.setdefault("email", self.email)
         payload.setdefault("subdirectory", self.subdirectory)
         payload.setdefault("idle_timeout_seconds", self._idle_timeout)

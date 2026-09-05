@@ -150,3 +150,10 @@ def test_instance_server_truncated_rom_writes_json_stderr(
     assert "truncated" in payload["error"]
     assert payload["rom_bytes"] == 1024
     assert payload["expected_rom_bytes"] == 1048576
+
+
+def test_instance_server_main_joins_without_timeout() -> None:
+    """A 15s join() return would kill the daemon PyBoy thread at boot."""
+    path = Path(__file__).resolve().parents[1] / "docker" / "instance_server.py"
+    source = path.read_text(encoding="utf-8")
+    assert "session.join(timeout=None)" in source

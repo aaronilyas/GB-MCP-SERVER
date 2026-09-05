@@ -271,6 +271,8 @@ def _reject_unplayable_or_invalid(
         rejected = dict(validation)
         rejected["valid"] = False
         rejected["reason"] = str(exc)
+        # Truncated dumps never carry size_note; drop a stale-validator leftover.
+        rejected.pop("size_note", None)
         return _invalid_rom_result(rejected, error=str(exc))
     return None
 

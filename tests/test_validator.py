@@ -70,6 +70,20 @@ def test_pokemon_header_only_rejected(validator_module) -> None:
     assert result.get("size_note") is None
 
 
+@pytest.mark.parametrize("size", [512, 8192])
+def test_pokemon_header_slices_rejected(validator_module, size: int) -> None:
+    """Incident stubs: 512-byte and 8 KiB slices of a size-code 0x05 header."""
+    rom = make_rom(size=size, title=b"POKEMON RED", rom_size_code=0x05)
+    result = validator_module.validate_gb_rom_bytes(rom)
+    assert result["valid"] is False
+    assert "truncated" in result["reason"]
+    assert str(size) in result["reason"]
+    assert "1048576" in result["reason"]
+    assert "0x05" in result["reason"]
+    assert result.get("size_note") is None
+    assert result.get("size_bytes") == size
+
+
 def test_full_size_pokemon_header_accepted(validator_module) -> None:
     rom = make_rom(size=1024 * 1024, title=b"POKEMON RED", rom_size_code=0x05)
     result = validator_module.validate_gb_rom_bytes(rom)

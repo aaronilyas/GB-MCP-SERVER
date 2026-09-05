@@ -231,7 +231,9 @@ def main(argv: list[str] | None = None) -> int:
     thread = threading.Thread(target=httpd.serve_forever, name="instance-http", daemon=True)
     thread.start()
 
-    session.join()
+    # join() defaults to 15s (MCP host stop_pyboy). The instance process
+    # must wait until idle/stop, otherwise the daemon PyBoy thread is killed.
+    session.join(timeout=None)
     time.sleep(0.2)
     httpd.shutdown()
     return _exit_code(session.close_reason)
