@@ -19,6 +19,7 @@ _TOOL_NAMES = (
     "map_subdirectory_to_email",
     "list_subdirectories_for_email",
     "load_subdirectory_rom",
+    "reset_pyboy",
     "send_pyboy_input",
     "ping_pyboy",
     "save_battery",

@@ -381,3 +381,123 @@ def test_status_keeps_host_email_over_instance_placeholder(
     assert overlaid["email"] == "owner@example.com"
     assert overlaid["restored_state"] is True
     assert overlaid["running"] is True
+
+
+def test_reset_stops_unlinks_snapshot_and_cold_boots(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    _state_path_for_rom(rom_path).write_bytes(b"POISON")
+    _ram_path_for_rom(rom_path).write_bytes(b"OLDRAM")
+    created: list[FakePyBoy] = []
+
+    def factory(path: Path) -> FakePyBoy:
+        instance = FakePyBoy(path)
+        created.append(instance)
+        return instance
+
+    pyboy_manager._backend._pyboy_factory = factory
+    loaded = pyboy_manager.load("owner@example.com", name, rom_path)
+    assert loaded["restored_state"] is True
+    first = created[0]
+    assert first.loaded_state == b"POISON"
+
+    result = pyboy_manager.reset("owner@example.com", name, rom_path)
+    assert result["started"] is True
+    assert result["running"] is True
+    assert result["already_running"] is False
+    assert result["restored_state"] is False
+    assert result["discarded"] is True
+    assert result["email"] == "owner@example.com"
+    assert "error" not in result
+    assert first.stopped is True
+    assert len(created) == 2
+    assert created[1] is not first
+    assert created[1].loaded_state is None
+    assert created[1].ticks == 0
+    assert not _state_path_for_rom(rom_path).exists()
+    assert _ram_path_for_rom(rom_path).is_file()
+
+    sent = pyboy_manager.send_input("owner@example.com", name, ["a"])
+    assert sent["sent"] is True
+    assert sent["email"] == "owner@example.com"
+
+
+def test_reset_without_running_session_unlinks_poison_and_leaves_sram(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    _state_path_for_rom(rom_path).write_bytes(b"POISON")
+    _ram_path_for_rom(rom_path).write_bytes(b"OLDRAM")
+    created: list[FakePyBoy] = []
+
+    def factory(path: Path) -> FakePyBoy:
+        instance = FakePyBoy(path)
+        created.append(instance)
+        return instance
+
+    pyboy_manager._backend._pyboy_factory = factory
+    result = pyboy_manager.reset("owner@example.com", name, rom_path)
+    assert result["started"] is True
+    assert result["running"] is True
+    assert result["restored_state"] is False
+    assert result["discarded"] is True
+    assert created[0].loaded_state is None
+    assert created[0].ticks == 0
+    assert not _state_path_for_rom(rom_path).exists()
+    assert _ram_path_for_rom(rom_path).read_bytes() == b"OLDRAM"
+
+
+def test_reset_discard_false_keeps_snapshot_and_skips_restore(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    _state_path_for_rom(rom_path).write_bytes(b"FAKESTATE")
+    created: list[FakePyBoy] = []
+
+    def factory(path: Path) -> FakePyBoy:
+        instance = FakePyBoy(path)
+        created.append(instance)
+        return instance
+
+    pyboy_manager._backend._pyboy_factory = factory
+    pyboy_manager.load("owner@example.com", name, rom_path)
+    result = pyboy_manager.reset(
+        "owner@example.com",
+        name,
+        rom_path,
+        discard_state=False,
+        restore_state=False,
+    )
+    assert result["started"] is True
+    assert result["restored_state"] is False
+    assert result["discarded"] is False
+    assert created[-1].loaded_state is None
+    assert created[-1].ticks == 0
+    assert _state_path_for_rom(rom_path).read_bytes() == b"FAKESTATE"
+
+
+def test_reset_discard_true_forces_restore_false(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    _state_path_for_rom(rom_path).write_bytes(b"POISON")
+    created: list[FakePyBoy] = []
+
+    def factory(path: Path) -> FakePyBoy:
+        instance = FakePyBoy(path)
+        created.append(instance)
+        return instance
+
+    pyboy_manager._backend._pyboy_factory = factory
+    result = pyboy_manager.reset(
+        "owner@example.com",
+        name,
+        rom_path,
+        discard_state=True,
+        restore_state=True,
+    )
+    assert result["restored_state"] is False
+    assert result["discarded"] is True
+    assert created[0].loaded_state is None
+    assert not _state_path_for_rom(rom_path).exists()

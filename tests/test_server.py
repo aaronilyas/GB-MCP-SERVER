@@ -13,10 +13,29 @@ from gb_mcp import config
 from gb_mcp.emulator import session as pyboy_sessions
 from gb_mcp.emulator.session import MAX_HOLD_FRAMES, MAX_INPUT_STEPS
 from gb_mcp.http import oauth_token_claims
+from gb_mcp.storage.roms import _state_path_for_rom
 
 from rom_builder import make_rom
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+_PUBLIC_TOOL_NAMES = (
+    "submit_gb_rom",
+    "begin_gb_rom_upload",
+    "get_gb_rom_upload",
+    "append_gb_rom_upload",
+    "append_gb_rom_upload_batch",
+    "finalize_gb_rom_upload",
+    "abort_gb_rom_upload",
+    "map_subdirectory_to_email",
+    "list_subdirectories_for_email",
+    "load_subdirectory_rom",
+    "reset_pyboy",
+    "send_pyboy_input",
+    "ping_pyboy",
+    "save_battery",
+    "stop_pyboy",
+)
 
 
 def _unwrap_input(result: dict[str, Any] | list[Any]) -> tuple[dict[str, Any], list[Image]]:
@@ -355,6 +374,21 @@ def test_load_subdirectory_rom_requires_email_and_mapping(isolated_db, roms_dir:
     assert "hexadecimal" in bad_name["error"]
 
 
+def test_public_tool_name_list() -> None:
+    names = [tool.name for tool in server.mcp._tool_manager.list_tools()]
+    for name in _PUBLIC_TOOL_NAMES:
+        assert name in names
+    assert "reset_pyboy" in names
+    reset = server.mcp._tool_manager.get_tool("reset_pyboy")
+    description = reset.description.lower()
+    assert "cold boot without the previous pyboy snapshot" in description
+    assert "warp" not in description
+    load = server.mcp._tool_manager.get_tool("load_subdirectory_rom")
+    load_desc = load.description.lower()
+    assert "restore_state" in load_desc
+    assert "warp" not in load_desc
+
+
 def test_load_subdirectory_rom_starts_pyboy(isolated_db, roms_dir: Path, pyboy_manager) -> None:
     name = _mapped_rom(roms_dir)
     result = server.load_subdirectory_rom("Owner@Example.com", name)
@@ -628,6 +662,69 @@ def test_stop_pyboy_without_session(isolated_db, roms_dir: Path, pyboy_manager) 
     assert "no PyBoy session" in result["error"]
 
 
+def test_load_subdirectory_rom_restore_state_false_skips_snapshot(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir)
+    rom_path = roms_dir / name / "tetris.gb"
+    _state_path_for_rom(rom_path).write_bytes(b"POISON")
+    result = server.load_subdirectory_rom(
+        "owner@example.com", name, restore_state=False
+    )
+    assert result["started"] is True
+    assert result["running"] is True
+    assert result["restored_state"] is False
+    session = pyboy_sessions.manager.get("owner@example.com")
+    assert session is not None
+    assert session._pyboy.loaded_state is None
+    assert _state_path_for_rom(rom_path).read_bytes() == b"POISON"
+
+
+def test_reset_pyboy_drops_poisoned_snapshot(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    name = _mapped_rom(roms_dir)
+    rom_path = roms_dir / name / "tetris.gb"
+    _state_path_for_rom(rom_path).write_bytes(b"POISON")
+    loaded = server.load_subdirectory_rom("owner@example.com", name)
+    assert loaded["restored_state"] is True
+    first = pyboy_sessions.manager.get("owner@example.com")
+    assert first is not None
+    first_pyboy = first._pyboy
+
+    result = server.reset_pyboy("owner@example.com", name)
+    assert result["started"] is True
+    assert result["running"] is True
+    assert result["already_running"] is False
+    assert result["restored_state"] is False
+    assert result["discarded"] is True
+    assert result["email"] == "owner@example.com"
+    assert not _state_path_for_rom(rom_path).exists()
+    session = pyboy_sessions.manager.get("owner@example.com")
+    assert session is not None
+    assert session._pyboy is not first_pyboy
+    assert session._pyboy.loaded_state is None
+    sent, images = _unwrap_input(server.send_pyboy_input("owner@example.com", name, ["a"]))
+    assert sent["sent"] is True
+    assert images
+    assert images[0].data is not None and images[0].data.startswith(PNG_MAGIC)
+    from gb_mcp.emulator.play_limits import FORBIDDEN_RESPONSE_KEY_NEEDLES
+
+    joined = " ".join(_flatten_status_keys(result)).lower()
+    for needle in FORBIDDEN_RESPONSE_KEY_NEEDLES:
+        assert needle not in joined
+
+
+def test_reset_pyboy_omitted_email_without_identity_returns_model_request() -> None:
+    result = server.reset_pyboy(subdirectory="a" * db.SUBDIRECTORY_NAME_LENGTH)
+    assert result["started"] is False
+    assert result["running"] is False
+    assert "model_request" in result
+    assert result["model_request"]["name"] == "email"
+    assert "invent" in result["model_request"]["instruction"].lower()
+    assert "trainer@x.ai" not in str(result).lower()
+
+
 def test_ping_pyboy_does_not_tick(isolated_db, roms_dir: Path, pyboy_manager) -> None:
     name = _mapped_rom(roms_dir)
     server.load_subdirectory_rom("owner@example.com", name, idle_timeout_seconds=30)
@@ -745,6 +842,7 @@ def test_load_binds_email_from_oauth_claims(
         )
         pinged = server.ping_pyboy(subdirectory=name)
         saved = server.save_battery(subdirectory=name)
+        reset = server.reset_pyboy(subdirectory=name)
         stopped = server.stop_pyboy(subdirectory=name)
     assert loaded["started"] is True
     assert loaded["email"] == "owner@example.com"
@@ -752,6 +850,9 @@ def test_load_binds_email_from_oauth_claims(
     assert images
     assert pinged["alive"] is True
     assert saved["saved"] is True
+    assert reset["started"] is True
+    assert reset["email"] == "owner@example.com"
+    assert reset["restored_state"] is False
     assert stopped["stopped"] is True
 
 

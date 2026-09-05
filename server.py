@@ -97,7 +97,10 @@ mcp = MCPServer(
         "Load a mapped subdirectory's ROM into PyBoy with load_subdirectory_rom "
         "(subdirectory is required; email may be omitted when the OAuth access "
         "token has an email or sub claim; default speed is uncapped; "
-        "unplayable/truncated files are rejected before a play instance starts). "
+        "restore_state defaults true so a later load resumes the previous PyBoy "
+        "snapshot; unplayable/truncated files are rejected before a play instance "
+        "starts). reset_pyboy stops a running instance if any, optionally unlinks "
+        "that snapshot, and cold-boots without the previous PyBoy snapshot. "
         "Play with send_pyboy_input (buttons, steps, macros, optional until on the "
         "framebuffer); it returns PNG screenshot(s). There is no memory or "
         "game-state tool — until and classifiers are screenshot-derived from the "
@@ -1049,8 +1052,12 @@ def list_subdirectories_for_email(
         "session keeps running until stop_pyboy is called, or until about 45 "
         "minutes pass with no send_pyboy_input or ping_pyboy; idle timeout "
         "auto-saves then closes PyBoy. Call ping_pyboy if you will think "
-        "longer than about 30 seconds. A later load of the same subdirectory "
-        "restores that save. There is no memory or game-state tool."
+        "longer than about 30 seconds. restore_state defaults true: a later "
+        "load of the same subdirectory resumes the previous PyBoy snapshot. "
+        "Pass restore_state=false to cold boot without the previous PyBoy "
+        "snapshot (the snapshot file is left on disk). If a session is already "
+        "running for this subdirectory it is reused; use reset_pyboy to stop, "
+        "drop the snapshot, and cold boot. There is no memory or game-state tool."
     ),
 )
 def load_subdirectory_rom(
@@ -1091,6 +1098,19 @@ def load_subdirectory_rom(
             ),
         ),
     ] = DEFAULT_IDLE_TIMEOUT_SECONDS,
+    restore_state: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "If true (default), resume from the previous PyBoy snapshot "
+                "when one exists. If false, cold boot without the previous "
+                "PyBoy snapshot; the snapshot file is left on disk. Cartridge "
+                "battery is unchanged. A session already running for this "
+                "subdirectory is reused regardless."
+            ),
+        ),
+    ] = True,
 ) -> dict[str, Any]:
     """Start (or resume) a PyBoy session for an owned ROM subdirectory."""
     resolved = _resolve_owned_session(
@@ -1168,6 +1188,7 @@ def load_subdirectory_rom(
             rom_path,
             emulation_speed=speed,
             idle_timeout_seconds=idle,
+            restore_state=bool(restore_state),
         )
     except Exception as exc:  # noqa: BLE001
         return {
@@ -1178,6 +1199,122 @@ def load_subdirectory_rom(
             "error": f"failed to start PyBoy: {exc}",
         }
     return result
+
+
+@mcp.tool(
+    name="reset_pyboy",
+    description=(
+        "Stop the running PyBoy instance for this email if any, optionally "
+        "unlink the previous PyBoy snapshot (rom.gb.state), then start the "
+        "owned subdirectory again. Default discard_state=true and "
+        "restore_state=false: cold boot without the previous PyBoy snapshot. "
+        "Cartridge battery (rom.gb.ram) is left alone. The 32-character "
+        "subdirectory name is required. Email may be omitted when the OAuth "
+        "access token has an email or sub claim. Do not invent an email. A "
+        "truncated or otherwise unplayable file is rejected before any play "
+        "instance starts. There is no memory or game-state tool."
+    ),
+)
+def reset_pyboy(
+    email: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=_EMAIL_ARG_DESCRIPTION,
+        ),
+    ] = None,
+    subdirectory: Annotated[
+        str,
+        Field(
+            description=(
+                "The 32-character subdirectory name of the PyBoy session to "
+                "reset."
+            )
+        ),
+    ] = "",
+    discard_state: Annotated[
+        bool,
+        Field(
+            default=True,
+            description=(
+                "If true (default), unlink rom.gb.state after stopping so the "
+                "next boot cannot resume that snapshot. Cartridge battery "
+                "(rom.gb.ram) is left alone."
+            ),
+        ),
+    ] = True,
+    restore_state: Annotated[
+        bool,
+        Field(
+            default=False,
+            description=(
+                "If true, resume from a remaining PyBoy snapshot after reset. "
+                "Default false. When discard_state is true this is forced "
+                "false: cold boot without the previous PyBoy snapshot."
+            ),
+        ),
+    ] = False,
+) -> dict[str, Any]:
+    """Stop if needed, optionally drop the PyBoy snapshot, then load again."""
+    resolved = _resolve_owned_session(
+        email, subdirectory, started=False, running=False
+    )
+    if isinstance(resolved, dict):
+        resolved["started"] = False
+        resolved["running"] = False
+        resolved.setdefault("discarded", False)
+        return resolved
+
+    normalized_email, name = resolved
+    try:
+        rom_path = _rom_in_subdirectory(name)
+        assert_rom_playable(rom_path)
+    except FileNotFoundError as exc:
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "discarded": False,
+            "error": str(exc),
+        }
+    except ValueError as exc:
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "discarded": False,
+            "error": _unplayable_boot_error(str(exc), name),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "discarded": False,
+            "error": str(exc),
+        }
+
+    try:
+        return _call_manager_method(
+            pyboy_sessions.manager.reset,
+            normalized_email,
+            name,
+            rom_path,
+            discard_state=bool(discard_state),
+            restore_state=bool(restore_state),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "started": False,
+            "running": False,
+            "email": normalized_email,
+            "subdirectory": name,
+            "discarded": False,
+            "error": f"failed to reset PyBoy: {exc}",
+        }
 
 
 def _input_error(email: str, subdirectory: str, error: str) -> dict[str, Any]:
@@ -1744,7 +1881,7 @@ PyBoy memory peeks.
 ## Workflow
 
 Typical order: submit (or begin/append/finalize) → map → list → load → input /
-ping / save → stop. Skip submit and map when the human already has mapped games.
+ping / save / reset → stop. Skip submit and map when the human already has mapped games.
 
 ### 1. submit_gb_rom
 
@@ -1819,9 +1956,21 @@ instance for that owned subdirectory. A truncated or otherwise unplayable
 file is rejected before a play instance starts; replace it first with
 `finalize_gb_rom_upload(..., subdirectory=<id>, email=...)`. Default
 `emulation_speed` is 0 (uncapped). Optional `idle_timeout_seconds` default is
-2700 (45 minutes). One live session per email: switching games saves and
-stops the previous instance, then starts the new one. A later load of the
-same subdirectory restores that save.
+2700 (45 minutes). `restore_state` defaults true: a later load of the same
+subdirectory resumes the previous PyBoy snapshot. Pass `restore_state=false`
+to cold boot without the previous PyBoy snapshot (the snapshot file is left
+on disk). If a session is already running for this subdirectory it is reused.
+One live session per email: switching games saves and stops the previous
+instance, then starts the new one.
+
+### 4b. reset_pyboy
+
+`subdirectory` is required. `email` may be omitted when the OAuth access
+token has an email or sub claim. Stops the running instance if any,
+optionally unlinks `rom.gb.state` (`discard_state` default true), then loads
+again. Default `restore_state=false`: cold boot without the previous PyBoy
+snapshot. Cartridge battery (`rom.gb.ram`) is left alone. Use this when a
+resume snapshot should be dropped. Do not invent an email.
 
 ### 5. send_pyboy_input
 
@@ -1880,7 +2029,7 @@ for this guide:
     mime_type="text/markdown",
     description=(
         "How a connected model should use this Game Boy MCP server (submit or "
-        "chunked upload, map, list, load, play, ping, save, stop). Contains no "
+        "chunked upload, map, list, load, reset, play, ping, save, stop). Contains no "
         "user data."
     ),
 )

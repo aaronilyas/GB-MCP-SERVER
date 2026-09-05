@@ -5,10 +5,12 @@
 ### Snapshot vs cartridge battery
 
 - `rom.gb.state` is a PyBoy `save_state` snapshot used to resume a session, not cartridge battery. Stop and idle still write that snapshot, then `pyboy.stop(save=True)` flushes SRAM (`rom.gb.ram`). `save_battery` cannot dump SRAM without stopping: PyBoy's public battery API is `stop(save=True)`. A failed `load_state` sets `restore_error`, leaves `restored_state=false`, and cold-boots. A successful restore ticks 8 frames with buttons released before the session is ready.
+- `reset_pyboy(email, subdirectory, discard_state=true, restore_state=false)` stops the instance if any, unlinks `rom.gb.state` when `discard_state` is true, then loads again with `restore_state=false` (cold boot without the previous PyBoy snapshot). Cartridge SRAM is left alone.
+- `load_subdirectory_rom` accepts `restore_state` (default `true`, same resume as today).
 
 ### Session email from OAuth
 
-- Play and mapping tools (`list_subdirectories_for_email`, `load_subdirectory_rom`, `send_pyboy_input`, `ping_pyboy`, `save_battery`, `stop_pyboy`, `submit_gb_rom`, `begin_gb_rom_upload`, `finalize_gb_rom_upload`, `map_subdirectory_to_email`) accept omitted `email` when the current OAuth access token has an `email` or `sub` claim. Explicit `email` still wins. If `email` is omitted and there is no token identity, the result includes a structured `model_request` asking for email (do not invent `trainer@x.ai`). Email is not transport auth; bearer/OAuth stays in `gb_mcp/http.py`.
+- Play and mapping tools (`list_subdirectories_for_email`, `load_subdirectory_rom`, `reset_pyboy`, `send_pyboy_input`, `ping_pyboy`, `save_battery`, `stop_pyboy`, `submit_gb_rom`, `begin_gb_rom_upload`, `finalize_gb_rom_upload`, `map_subdirectory_to_email`) accept omitted `email` when the current OAuth access token has an `email` or `sub` claim. Explicit `email` still wins. If `email` is omitted and there is no token identity, the result includes a structured `model_request` asking for email (do not invent `trainer@x.ai`). Email is not transport auth; bearer/OAuth stays in `gb_mcp/http.py`.
 
 ### Screenshot-only play loop
 

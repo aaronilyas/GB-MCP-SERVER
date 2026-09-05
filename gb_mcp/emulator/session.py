@@ -19,7 +19,7 @@ from gb_mcp.emulator.backend import (
     InstanceHandle,
     _dead_message,
 )
-from gb_mcp.emulator.loop import PyBoyFactory
+from gb_mcp.emulator.loop import PyBoyFactory, _state_path_for_rom
 from gb_mcp.emulator.play_limits import (
     BUTTONS,
     DEFAULT_EMULATION_SPEED,
@@ -426,6 +426,55 @@ class SessionManager:
             return session.status(discarded=False, error=_tool_error(exc))
         return session.status(**result)
 
+    def reset(
+        self,
+        email: str,
+        subdirectory: str,
+        rom_path: Path,
+        *,
+        discard_state: bool = True,
+        restore_state: bool = False,
+        emulation_speed: int | None = None,
+        idle_timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        """Stop if running, optionally unlink ``rom.gb.state``, then load again.
+
+        When ``discard_state`` is true the snapshot is unlinked after stop and
+        load uses ``restore_state=false`` (cold boot without the previous
+        PyBoy snapshot). Cartridge SRAM (``rom.gb.ram``) is left alone.
+        """
+        with self._lock:
+            current = self._by_email.get(email)
+        if current is not None and current.is_running:
+            stopped = self.stop(email, current.subdirectory)
+            if current.is_running:
+                return {
+                    "started": False,
+                    "running": True,
+                    "email": email,
+                    "subdirectory": subdirectory,
+                    "discarded": False,
+                    "error": stopped.get("error")
+                    or "failed to stop the existing PyBoy session before reset",
+                }
+
+        discarded = False
+        resume = bool(restore_state)
+        if discard_state:
+            discarded = _unlink_snapshot(rom_path)
+            resume = False
+
+        result = self.load(
+            email,
+            subdirectory,
+            rom_path,
+            emulation_speed=emulation_speed,
+            idle_timeout_seconds=idle_timeout_seconds,
+            restore_state=resume,
+        )
+        result["discarded"] = discarded
+        return result
+
     def stop(self, email: str, subdirectory: str) -> dict[str, Any]:
         with self._lock:
             session = self._by_email.get(email)
@@ -498,6 +547,18 @@ class SessionManager:
             if session.is_running:
                 session.request_stop(reason="shutdown")
                 session.join(timeout=15)
+
+
+def _unlink_snapshot(rom_path: Path) -> bool:
+    """Unlink ``rom.gb.state`` on the host volume. Does not touch SRAM."""
+    path = _state_path_for_rom(rom_path)
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
 
 
 def _tool_error(exc: BaseException) -> str:

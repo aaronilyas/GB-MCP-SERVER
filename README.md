@@ -65,7 +65,8 @@ Docker dump.
 | `abort_gb_rom_upload` | Cancel an in-flight chunked upload and delete staging |
 | `map_subdirectory_to_email` | Bind a 32-hex directory to the user's email |
 | `list_subdirectories_for_email` | List that user's games and header metadata, including `playable` |
-| `load_subdirectory_rom` | Start / resume a play instance (default speed uncapped; 45-minute idle) |
+| `load_subdirectory_rom` | Start / resume a play instance (`restore_state` default true; uncapped speed; 45-minute idle) |
+| `reset_pyboy` | Stop if running, optionally drop `rom.gb.state`, cold boot without the previous PyBoy snapshot |
 | `send_pyboy_input` | Buttons, steps, macros, optional framebuffer `until`; returns PNG screenshot(s) at scale 4 |
 | `ping_pyboy` | Reset the idle timer without advancing emulation or pressing buttons |
 | `save_battery` | Write the cartridge save without stopping PyBoy |
@@ -151,7 +152,7 @@ argument.
 | `gb://users/{email}/roms` | Owned ROM list and game metadata |
 | `gb://users/{email}/roms/{subdirectory}` | Cartridge header metadata for an owned ROM |
 | `gb://users/{email}/session` | Live play-instance status for that email |
-| `gb://usage` | How a connected model should use this server (chunked ingest, map, list, load, play, ping, save, stop). Contains no user data. |
+| `gb://usage` | How a connected model should use this server (chunked ingest, map, list, load, reset, play, ping, save, stop). Contains no user data. |
 
 ## Compose
 
@@ -196,7 +197,10 @@ directory, not `/app/roms` inside the MCP container.
 
 Save files live next to the ROM (`roms/<32-hex>/<name>.gb.state`). Stopping or
 idling removes `gb-play-<32-hex>`; the `.state` file stays on the volume. The
-next `load_subdirectory_rom` starts a new container and restores it.
+next `load_subdirectory_rom` starts a new container and restores it
+(`restore_state` default true). `reset_pyboy` stops that instance if any,
+unlinks the snapshot when `discard_state` is true, and cold-boots without the
+previous PyBoy snapshot. Cartridge SRAM (`*.gb.ram`) is left alone.
 
 ## Local stdio
 
