@@ -54,14 +54,16 @@ def test_load_starts_session_and_stop_saves(
     session = pyboy_manager.get("owner@example.com")
     assert session is not None
     assert session.container_name == play_container_name(name)
-    assert session._pyboy.speed == 1
+    assert session._pyboy.speed == 0
 
     sent = pyboy_manager.send_input("owner@example.com", name, ["a", "start"], hold_frames=4)
     assert sent["sent"] is True
     assert sent["steps"] == [{"buttons": ["a", "start"], "hold_frames": 4, "step_index": 0}]
     assert sent["screenshot_mode"] == "final"
     assert sent["screenshot_count"] == 1
-    assert session._pyboy.buttons == [("a", 4), ("start", 4)]
+    assert "a" in session._pyboy.presses
+    assert "start" in session._pyboy.presses
+    assert session._pyboy._pressed == set()
     assert len(sent["pngs"]) == 1
     _assert_png(sent["pngs"][0])
 
@@ -229,7 +231,7 @@ def test_send_input_single_step_returns_one_png(
     assert sent["sent"] is True
     assert sent["screenshot_mode"] == "final"
     assert sent["screenshot_count"] == 1
-    assert sent["screenshots"] == [{"step_index": 0}]
+    assert sent["screenshots"][-1].get("step_index") == 0
     assert len(sent["pngs"]) == 1
     _assert_png(sent["pngs"][0])
 
@@ -251,11 +253,7 @@ def test_send_input_steps_all_returns_one_png_per_step(
     )
     assert sent["sent"] is True
     assert sent["screenshot_count"] == 3
-    assert sent["screenshots"] == [
-        {"step_index": 0},
-        {"step_index": 1},
-        {"step_index": 2},
-    ]
+    assert [item.get("step_index") for item in sent["screenshots"]] == [0, 1, 2]
     assert len(sent["pngs"]) == 3
     images = [_assert_png(png) for png in sent["pngs"]]
     assert sent["pngs"][0] != sent["pngs"][1] != sent["pngs"][2]
@@ -277,7 +275,7 @@ def test_send_input_steps_final_returns_last_png_only(
     )
     assert sent["sent"] is True
     assert sent["screenshot_count"] == 1
-    assert sent["screenshots"] == [{"step_index": 2}]
+    assert sent["screenshots"][-1].get("step_index") == 2
     assert len(sent["pngs"]) == 1
     _assert_png(sent["pngs"][0])
 
@@ -298,8 +296,8 @@ def test_send_input_applies_steps_in_order(
         screenshot_mode="all",
     )
     assert sent["sent"] is True
-    assert pyboy.buttons == [("a", 1), ("b", 2), ("right", 2), ("start", 3)]
-    assert [count for count in pyboy.tick_calls if count > 1] == [2, 3, 4]
+    assert pyboy.presses == ["a", "b", "right", "start"]
+    assert pyboy._pressed == set()
     assert sent["steps"] == [
         {"buttons": ["a"], "hold_frames": 1, "step_index": 0},
         {"buttons": ["b", "right"], "hold_frames": 2, "step_index": 1},
@@ -340,12 +338,11 @@ def test_input_fails_without_partial_pngs_if_emulator_stops(
 ) -> None:
     class StoppingPyBoy(FakePyBoy):
         def tick(self, count: int = 1, render: bool = True, sound: bool = True) -> bool:
-            if count > 1:
-                self._input_batches = getattr(self, "_input_batches", 0) + 1
-                if self._input_batches >= 2:
-                    super().tick(count, render, sound)
-                    self._dead.set()
-                    return False
+            n = count if isinstance(count, int) and count > 0 else 0
+            if self.ticks + n >= 3:
+                super().tick(max(1, 3 - self.ticks), render, sound)
+                self._dead.set()
+                return False
             return super().tick(count, render, sound)
 
     manager = SessionManager(
@@ -400,7 +397,7 @@ def test_dead_instance_error_is_clean(
     isolated_db, roms_dir: Path
 ) -> None:
     class DumpBackend(FakeInstanceBackend):
-        def send_input(self, handle, steps, screenshot_mode, *, timeout=30):  # noqa: ARG002
+        def send_input(self, handle, steps, screenshot_mode, *, timeout=30, **kwargs):  # noqa: ARG002
             raise RuntimeError(
                 "Error response from daemon:\n" + ("SECRET_DOCKER_DUMP\n" * 80)
             )

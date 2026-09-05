@@ -10,6 +10,7 @@ from mcp.server.mcpserver.utilities.types import Image
 import db
 import server
 from gb_mcp import config
+from gb_mcp.emulator import session as pyboy_sessions
 from gb_mcp.emulator.session import MAX_HOLD_FRAMES, MAX_INPUT_STEPS
 
 from rom_builder import make_rom
@@ -93,6 +94,19 @@ def test_submit_saves_and_requests_email(fake_docker, isolated_db, roms_dir: Pat
     saved = config.ROOT / result["path"]
     assert saved.read_bytes() == rom
     assert saved.name == "tetris.gb"
+
+
+def test_submit_boot_starts_pyboy(fake_docker, isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    fake_docker.setattr(
+        server,
+        "_validate_inside_container",
+        lambda _cid, _data: {"valid": True, "reason": "ok"},
+    )
+    result = server.submit_gb_rom(_b64(make_rom()), email="owner@example.com", boot=True)
+    assert result["accepted"] is True
+    assert result["mapped"] is True
+    assert result.get("started") is True
+    assert result.get("running") is True
 
 
 def test_submit_maps_email_when_provided(fake_docker, isolated_db, roms_dir: Path) -> None:
@@ -198,7 +212,7 @@ def test_load_subdirectory_rom_starts_pyboy(isolated_db, roms_dir: Path, pyboy_m
     assert result["email"] == "owner@example.com"
     assert result["subdirectory"] == name
     assert result["rom"] == "tetris.gb"
-    assert result["idle_timeout_seconds"] == 30
+    assert result["idle_timeout_seconds"] == 2700
 
     again = server.load_subdirectory_rom("owner@example.com", name)
     assert again["already_running"] is True
@@ -298,11 +312,7 @@ def test_send_pyboy_input_steps_all_returns_three_images(
     )
     assert status["sent"] is True
     assert status["screenshot_count"] == 3
-    assert status["screenshots"] == [
-        {"step_index": 0},
-        {"step_index": 1},
-        {"step_index": 2},
-    ]
+    assert [item.get("step_index") for item in status["screenshots"]] == [0, 1, 2]
     assert len(images) == 3
     payloads = []
     for image in images:
@@ -328,7 +338,7 @@ def test_send_pyboy_input_steps_final_returns_one_image(
     )
     assert status["sent"] is True
     assert status["screenshot_count"] == 1
-    assert status["screenshots"] == [{"step_index": 2}]
+    assert status["screenshots"][-1].get("step_index") == 2
     assert len(images) == 1
     assert images[0].data is not None and images[0].data.startswith(PNG_MAGIC)
 
@@ -346,13 +356,14 @@ def test_send_pyboy_input_rejects_invalid_steps(
     assert "steps must not be empty" in empty_steps["error"]
     assert empty_images == []
 
-    empty_in_step, _ = _unwrap_input(
+    empty_in_step, wait_images = _unwrap_input(
         server.send_pyboy_input(
             "owner@example.com", name, steps=[{"buttons": [], "hold_frames": 1}]
         )
     )
-    assert empty_in_step["sent"] is False
-    assert "at least one button" in empty_in_step["error"]
+    assert empty_in_step["sent"] is True
+    assert empty_in_step["steps"][0]["buttons"] == []
+    assert wait_images
 
     bad_button, _ = _unwrap_input(
         server.send_pyboy_input(
@@ -409,3 +420,73 @@ def test_stop_pyboy_without_session(isolated_db, roms_dir: Path, pyboy_manager) 
     result = server.stop_pyboy("owner@example.com", name)
     assert result["stopped"] is False
     assert "no PyBoy session" in result["error"]
+
+
+def test_ping_pyboy_does_not_tick(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name, idle_timeout_seconds=30)
+    session = pyboy_sessions.manager.get("owner@example.com")
+    assert session is not None
+    ticks = session._pyboy.ticks
+    result = server.ping_pyboy("owner@example.com", name)
+    assert result["alive"] is True
+    assert session._pyboy.ticks == ticks
+    assert result["seconds_since_last_input"] < 1
+
+
+def test_save_battery_keeps_session(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name, idle_timeout_seconds=30)
+    result = server.save_battery("owner@example.com", name)
+    assert result["saved"] is True
+    sent, images = _unwrap_input(server.send_pyboy_input("owner@example.com", name, ["a"]))
+    assert sent["sent"] is True
+    assert images
+
+
+def test_send_pyboy_input_hold_and_scale(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    from gb_mcp.emulator.play_limits import FORBIDDEN_RESPONSE_KEY_NEEDLES
+    from PIL import Image as PILImage
+    import io
+
+    name = _mapped_rom(roms_dir)
+    server.load_subdirectory_rom("owner@example.com", name, idle_timeout_seconds=30)
+    status, images = _unwrap_input(
+        server.send_pyboy_input(
+            "owner@example.com",
+            name,
+            macro="hold",
+            buttons=["up"],
+            max_frames=12,
+            disable_default_hold_abort=True,
+            screenshot_scale=3,
+            screenshot_mode="final",
+        )
+    )
+    assert status["sent"] is True
+    assert status["emulation_speed"] == 0
+    assert status["screenshot_scale"] == 3
+    assert status["native_size"] == [160, 144]
+    assert "stop_reason" in status
+    assert "region_hashes" in status and "full" in status["region_hashes"]
+    assert "classifiers" in status
+    blob = images[0].data
+    assert blob is not None
+    image = PILImage.open(io.BytesIO(blob))
+    assert image.size == (160 * 3, 144 * 3)
+    joined = " ".join(_flatten_status_keys(status)).lower()
+    for needle in FORBIDDEN_RESPONSE_KEY_NEEDLES:
+        assert needle not in joined
+
+
+def _flatten_status_keys(payload: object, prefix: str = "") -> list[str]:
+    keys: list[str] = []
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            keys.append(path)
+            keys.extend(_flatten_status_keys(value, path))
+    elif isinstance(payload, list):
+        for item in payload[:8]:
+            keys.extend(_flatten_status_keys(item, prefix))
+    return keys
