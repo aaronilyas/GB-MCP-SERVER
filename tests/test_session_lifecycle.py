@@ -15,7 +15,7 @@ from gb_mcp.emulator.loop import (
     rewrite_host_email,
 )
 from gb_mcp.emulator.play_limits import BUTTONS
-from gb_mcp.emulator.session import SessionManager
+from gb_mcp.emulator.session import PlaySession, SessionManager
 from gb_mcp.storage.roms import _state_path_for_rom
 
 from conftest import FakePyBoy
@@ -23,13 +23,17 @@ from rom_builder import make_rom
 
 
 def _write_mapped_rom(
-    roms_dir: Path, *, email: str = "owner@example.com", name: str | None = None
+    roms_dir: Path,
+    *,
+    email: str = "owner@example.com",
+    name: str | None = None,
+    title: bytes = b"TETRIS",
 ) -> tuple[str, Path]:
     name = name or ("a" * db.SUBDIRECTORY_NAME_LENGTH)
     dest = roms_dir / name
     dest.mkdir()
     rom_path = dest / "tetris.gb"
-    rom_path.write_bytes(make_rom(title=b"TETRIS"))
+    rom_path.write_bytes(make_rom(title=title))
     with db.session_scope() as session:
         db.map_subdirectory_to_email(session, name, email)
     return name, rom_path
@@ -655,3 +659,102 @@ def test_docker_rpc_rewrites_instance_email(
     assert status["email"] == "player@example.com"
     assert status["restored_state"] is True
     assert status["running"] is True
+
+
+def test_resolve_game_unique_title_case_insensitive(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    name, rom_path = _write_mapped_rom(roms_dir)
+    result = pyboy_manager.resolve_game("owner@example.com", title="tetris")
+    assert "error" not in result
+    assert result["title"] == "TETRIS"
+    assert result["id"] == name
+    assert result["subdirectory"] == name
+    assert result["playable"] is True
+    assert result["rom_path"] == rom_path
+    again = pyboy_manager.resolve_game("owner@example.com", title="TeTrIs")
+    assert again["id"] == name
+    assert again["subdirectory"] == name
+
+
+def test_resolve_game_duplicate_title_lists_matches(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    first, _ = _write_mapped_rom(roms_dir, name="a" * db.SUBDIRECTORY_NAME_LENGTH)
+    second, _ = _write_mapped_rom(roms_dir, name="b" * db.SUBDIRECTORY_NAME_LENGTH)
+    result = pyboy_manager.resolve_game("owner@example.com", title="TETRIS")
+    assert "error" in result
+    matches = result["matches"]
+    assert {item["id"] for item in matches} == {first, second}
+    for item in matches:
+        assert item["title"] == "TETRIS"
+        assert item["playable"] is True
+        assert set(item) >= {"title", "id"}
+
+
+def test_resolve_game_hex_id_disambiguates(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    first, first_rom = _write_mapped_rom(
+        roms_dir, name="a" * db.SUBDIRECTORY_NAME_LENGTH
+    )
+    second, second_rom = _write_mapped_rom(
+        roms_dir, name="b" * db.SUBDIRECTORY_NAME_LENGTH
+    )
+    by_id = pyboy_manager.resolve_game("owner@example.com", id=second)
+    assert "error" not in by_id
+    assert by_id["id"] == second
+    assert by_id["subdirectory"] == second
+    assert by_id["rom_path"] == second_rom
+    disambiguated = pyboy_manager.resolve_game(
+        "owner@example.com", title="tetris", id=second
+    )
+    assert "error" not in disambiguated
+    assert disambiguated["id"] == second
+    assert disambiguated["subdirectory"] == second
+    assert disambiguated["rom_path"] == second_rom
+    other = pyboy_manager.resolve_game("owner@example.com", title="TETRIS", id=first)
+    assert other["id"] == first
+    assert other["rom_path"] == first_rom
+
+
+def test_resolve_game_unknown_title_id_and_other_owner(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    owned, _ = _write_mapped_rom(roms_dir)
+    foreign, _ = _write_mapped_rom(
+        roms_dir,
+        email="other@example.com",
+        name="c" * db.SUBDIRECTORY_NAME_LENGTH,
+        title=b"ZELDA",
+    )
+    unknown_id = "f" * db.SUBDIRECTORY_NAME_LENGTH
+    missing_title = pyboy_manager.resolve_game("owner@example.com", title="POKEMON")
+    assert "error" in missing_title
+    assert "matches" not in missing_title
+    missing_id = pyboy_manager.resolve_game("owner@example.com", id=unknown_id)
+    assert "error" in missing_id
+    foreign_id = pyboy_manager.resolve_game("owner@example.com", id=foreign)
+    assert "error" in foreign_id
+    foreign_title = pyboy_manager.resolve_game("owner@example.com", title="ZELDA")
+    assert "error" in foreign_title
+    still_owned = pyboy_manager.resolve_game("owner@example.com", id=owned)
+    assert still_owned["id"] == owned
+
+
+def test_current_returns_running_session_or_idle_dict(
+    isolated_db, roms_dir: Path, pyboy_manager: SessionManager
+) -> None:
+    idle = pyboy_manager.current("owner@example.com")
+    assert idle["running"] is False
+    assert idle["email"] == "owner@example.com"
+    assert "error" in idle
+    assert not isinstance(idle, PlaySession)
+
+    name, rom_path = _write_mapped_rom(roms_dir)
+    pyboy_manager.load("owner@example.com", name, rom_path)
+    session = pyboy_manager.current("owner@example.com")
+    assert isinstance(session, PlaySession)
+    assert session.is_running is True
+    assert session is pyboy_manager.get("owner@example.com")
+    assert session.subdirectory == name

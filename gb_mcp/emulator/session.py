@@ -11,6 +11,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import db
 from gb_mcp import config
 from gb_mcp.emulator.backend import (
     InProcessBackend,
@@ -24,6 +25,7 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_EMULATION_SPEED,
     INPUT_COMMAND_TIMEOUT_SECONDS,
 )
+from gb_mcp.storage.roms import _describe_subdirectory
 
 _SUBMIT_OPS = frozenset({"input", "ping", "save", "discard_state"})
 
@@ -250,6 +252,99 @@ class SessionManager:
     def get(self, email: str) -> PlaySession | None:
         with self._lock:
             return self._by_email.get(email)
+
+    def current(self, email: str) -> PlaySession | dict[str, Any]:
+        """Return the live session for ``email``, or an idle error dict."""
+        with self._lock:
+            session = self._by_email.get(email)
+        if session is not None and session.is_running:
+            return session
+        reason = None if session is None else session.close_reason
+        error = "no PyBoy session is running for this email"
+        if reason == "idle_timeout" or reason in {
+            "instance_exited",
+            "error",
+            "emulator_stopped",
+        }:
+            error = _dead_message(reason)
+        payload: dict[str, Any] = {
+            "running": False,
+            "email": email,
+            "error": error,
+        }
+        if session is not None:
+            payload["subdirectory"] = session.subdirectory
+        return payload
+
+    def resolve_game(
+        self,
+        email: str,
+        title: str | None = None,
+        id: str | None = None,
+    ) -> dict[str, Any]:
+        """Map ``title`` / hex subdirectory ``id`` to an owned ROM for ``load``."""
+        wanted_title = title.strip() if isinstance(title, str) else None
+        if not wanted_title:
+            wanted_title = None
+        wanted_id = id.strip().lower() if isinstance(id, str) else None
+        if not wanted_id:
+            wanted_id = None
+        if wanted_title is None and wanted_id is None:
+            return {"email": email, "error": "title or id is required"}
+
+        try:
+            with db.session_scope() as session:
+                rows = db.list_subdirectories_for_email(session, email)
+                mapped = [(row.name, row.created_at) for row in rows]
+        except Exception as exc:  # noqa: BLE001
+            return {"email": email, "error": str(exc)}
+
+        owned = [
+            (name, _describe_subdirectory(name, created_at))
+            for name, created_at in mapped
+        ]
+
+        if wanted_id is not None:
+            selected = [(name, info) for name, info in owned if name == wanted_id]
+            if not selected:
+                return {
+                    "email": email,
+                    "id": wanted_id,
+                    "error": "subdirectory is not mapped to this email",
+                }
+            name, info = selected[0]
+            return _resolved_game(email, name, _pick_game(info, wanted_title))
+
+        assert wanted_title is not None
+        needle = wanted_title.casefold()
+        matches: list[tuple[str, dict[str, Any]]] = []
+        for name, info in owned:
+            game = _matching_game(info, needle)
+            if game is not None:
+                matches.append((name, game))
+
+        if not matches:
+            return {
+                "email": email,
+                "title": wanted_title,
+                "error": f"no mapped game matches title {wanted_title!r}",
+            }
+        if len(matches) > 1:
+            return {
+                "email": email,
+                "title": wanted_title,
+                "error": "multiple mapped games match that title; pass id to select one",
+                "matches": [
+                    {
+                        "title": game.get("title"),
+                        "id": name,
+                        "playable": bool(game.get("playable", False)),
+                    }
+                    for name, game in matches
+                ],
+            }
+        name, game = matches[0]
+        return _resolved_game(email, name, game)
 
     def load(
         self,
@@ -565,6 +660,41 @@ class SessionManager:
             if session.is_running:
                 session.request_stop(reason="shutdown")
                 session.join(timeout=15)
+
+
+def _matching_game(info: dict[str, Any], needle: str) -> dict[str, Any] | None:
+    for game in info.get("games") or []:
+        if not isinstance(game, dict):
+            continue
+        game_title = game.get("title")
+        if isinstance(game_title, str) and game_title.casefold() == needle:
+            return game
+    return None
+
+
+def _pick_game(info: dict[str, Any], title: str | None) -> dict[str, Any]:
+    if title:
+        game = _matching_game(info, title.casefold())
+        if game is not None:
+            return game
+    games = [game for game in (info.get("games") or []) if isinstance(game, dict)]
+    if games:
+        return games[0]
+    return {"title": None, "playable": False}
+
+
+def _resolved_game(email: str, subdirectory: str, game: dict[str, Any]) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "email": email,
+        "title": game.get("title"),
+        "id": subdirectory,
+        "subdirectory": subdirectory,
+        "playable": bool(game.get("playable", False)),
+    }
+    filename = game.get("filename")
+    if filename:
+        payload["rom_path"] = config.ROMS_DIR / subdirectory / str(filename)
+    return payload
 
 
 def _unlink_snapshot(rom_path: Path) -> bool:
