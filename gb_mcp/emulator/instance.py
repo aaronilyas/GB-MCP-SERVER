@@ -136,6 +136,14 @@ class DockerInstanceBackend:
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError("Play instance returned an invalid screenshot") from exc
         remote["pngs"] = pngs
+        gif_b64 = remote.pop("gif_b64", None)
+        if isinstance(gif_b64, str) and gif_b64:
+            try:
+                remote["gif"] = base64.b64decode(gif_b64)
+            except Exception as exc:  # noqa: BLE001
+                raise RuntimeError("Play instance returned an invalid screenshot") from exc
+        else:
+            remote.pop("gif", None)
         return _forwarded_rpc(handle, remote)
 
     def ping(self, handle: InstanceHandle, *, timeout: float = 10) -> dict[str, Any]:
