@@ -87,6 +87,125 @@ def shape_status(
     return payload
 
 
+PUBLIC_STATUS_KEYS = frozenset(
+    {"ok", "frames", "stopped", "game", "looks_like", "error"}
+)
+
+# First matching True classifier wins.
+_LOOKS_LIKE_PRIORITY: tuple[tuple[str, str], ...] = (
+    ("battle_likely", "battle"),
+    ("textbox_likely", "textbox"),
+    ("start_menu_likely", "menu"),
+    ("window_occluded_likely", "fade"),
+)
+
+
+def _as_text(value: object) -> str | None:
+    if isinstance(value, Path):
+        value = str(value)
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def _rom_stem(value: object) -> str | None:
+    text = _as_text(value)
+    if text is None:
+        return None
+    name = Path(text).name.strip()
+    if not name or name in {".", ".."}:
+        return None
+    stem = Path(name).stem.strip()
+    return stem or None
+
+
+def _public_game(internal: dict[str, Any]) -> str | None:
+    title = _as_text(internal.get("cartridge_title"))
+    if title is not None:
+        cleaned = title.strip()
+        if cleaned and "/" not in cleaned and "\\" not in cleaned:
+            return cleaned
+    for key in ("rom", "rom_path"):
+        stem = _rom_stem(internal.get(key))
+        if stem is not None:
+            return stem
+    return None
+
+
+def _public_looks_like(internal: dict[str, Any]) -> str | None:
+    flags: dict[str, Any] = {}
+    classifiers = internal.get("classifiers")
+    if isinstance(classifiers, dict):
+        flags.update(classifiers)
+    for src, _label in _LOOKS_LIKE_PRIORITY:
+        if src in internal:
+            flags[src] = internal[src]
+    for src, label in _LOOKS_LIKE_PRIORITY:
+        if flags.get(src) is True:
+            return label
+    return None
+
+
+def _public_ok(internal: dict[str, Any]) -> bool:
+    if internal.get("ok") is False or internal.get("sent") is False:
+        return False
+    if internal.get("error"):
+        return False
+    return True
+
+
+def _public_frames(internal: dict[str, Any]) -> int:
+    if "frames_advanced" in internal:
+        raw = internal.get("frames_advanced")
+    else:
+        raw = internal.get("frames", 0)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _public_stopped(internal: dict[str, Any]) -> bool:
+    return internal.get("running") is False or internal.get("stopped") is True
+
+
+def _public_error(internal: dict[str, Any]) -> str | None:
+    error = internal.get("error")
+    if error is None or error is False:
+        return None
+    if isinstance(error, str):
+        text = error.strip()
+        return text or None
+    if isinstance(error, (dict, list, bool)):
+        return None
+    text = str(error).strip()
+    return text or None
+
+
+def shape_public_status(internal: dict[str, Any]) -> dict[str, Any]:
+    """Map an internal play/status payload to the model-facing dict.
+
+    Always includes ``ok``, ``frames``, ``stopped``, and ``game``. Adds
+    ``looks_like`` when a classifier is true (battle > textbox > menu > fade)
+    and ``error`` on failure. Builds a new dict so hashes, paths, idle
+    timers, OCR, and classifier objects cannot leak through.
+    """
+    payload: dict[str, Any] = {
+        "ok": _public_ok(internal),
+        "frames": _public_frames(internal),
+        "stopped": _public_stopped(internal),
+        "game": _public_game(internal),
+    }
+    looks_like = _public_looks_like(internal)
+    if looks_like is not None:
+        payload["looks_like"] = looks_like
+    error = _public_error(internal)
+    if error is not None:
+        payload["error"] = error
+        payload["ok"] = False
+    return payload
+
+
 def rewrite_host_email(payload: dict[str, Any], host_email: str | None) -> dict[str, Any]:
     """If ``payload`` has ``email``, set it to the MCP host email, never ``instance``.
 

@@ -437,19 +437,85 @@ def test_no_game_state_leakage_allowlist() -> None:
             assert needle not in joined
 
 
-def test_submit_email_maps_without_map_tool(fake_docker_submit, isolated_db, roms_dir: Path) -> None:
-    """Case 12: submit + email creates the mapping without map_subdirectory_to_email."""
+def test_public_shaping_of_play_dict_does_not_leak_hashes() -> None:
+    """Public shaper of a play-like engine dict must not leak hashes or paths."""
+    from gb_mcp.emulator.loop import PUBLIC_STATUS_KEYS, shape_public_status
+
+    play_like = {
+        "sent": True,
+        "stop_reason": "completed",
+        "frames_advanced": 4,
+        "emulation_speed": 0,
+        "until_fired": False,
+        "region_hashes": {"full": "abc", "bottom": "def", "center": "ghi"},
+        "classifiers": {
+            "textbox_likely": False,
+            "battle_likely": False,
+            "start_menu_likely": False,
+            "window_occluded_likely": False,
+        },
+        "screenshot_scale": 4,
+        "native_size": [160, 144],
+        "email": "owner@example.com",
+        "subdirectory": "a" * 32,
+        "rom": "tetris.gb",
+        "rom_path": "roms/" + "a" * 32 + "/tetris.gb",
+        "running": True,
+        "saved": False,
+        "screenshot_mode": "final",
+        "screenshot_count": 1,
+        "screenshots": [{"kind": "final", "frame_index": 4, "step_index": 0}],
+        "pngs": [b"\x89PNG"],
+        "macro": "buttons",
+        "hash": "abc",
+        "blake2s": "def",
+        "cartridge_title": "TETRIS",
+        "idle_timeout_seconds": 300,
+        "seconds_until_idle_close": 10.0,
+        "seconds_since_last_input": 0.1,
+        "ocr_text": "TETRIS",
+    }
+    public = shape_public_status(play_like)
+    assert public["ok"] is True
+    assert public["frames"] == 4
+    assert public["stopped"] is False
+    assert public["game"] == "TETRIS"
+    assert "looks_like" not in public
+    assert set(public) <= PUBLIC_STATUS_KEYS
+    for path in _flatten_keys(public):
+        joined = path.lower()
+        assert "hash" not in joined
+        assert "blake" not in joined
+        assert "region" not in joined
+        assert "rom_path" not in joined
+        assert "email" not in joined
+        for needle in FORBIDDEN_RESPONSE_KEY_NEEDLES:
+            assert needle not in joined
+    for key in (
+        "region_hashes",
+        "rom_path",
+        "native_size",
+        "email",
+        "subdirectory",
+        "classifiers",
+        "pngs",
+        "frames_advanced",
+        "battle_likely",
+    ):
+        assert key not in public
+
+
+def test_add_rom_maps_without_map_tool(fake_docker_submit, isolated_db, roms_dir: Path) -> None:
+    """Case 12: add_rom maps from OAuth identity; no map tool on the catalog."""
     import server
+    from gb_mcp.http import oauth_token_claims
     from rom_builder import make_rom as _make
 
-    result = server.submit_gb_rom(
-        __import__("base64").b64encode(_make()).decode(),
-        email="Owner@Example.com",
-    )
+    with oauth_token_claims({"email": "Owner@Example.com"}):
+        result = server.add_rom(__import__("base64").b64encode(_make()).decode())
     assert result["accepted"] is True
     assert result["mapped"] is True
-    assert result["email"] == "owner@example.com"
-    name = result["subdirectory"]
+    name = result["id"]
     with db.session_scope() as session:
         row = db.get_subdirectory_for_email(session, name, "owner@example.com")
     assert row is not None
@@ -457,14 +523,14 @@ def test_submit_email_maps_without_map_tool(fake_docker_submit, isolated_db, rom
 
 @pytest.fixture
 def fake_docker_submit(monkeypatch: pytest.MonkeyPatch):
-    import server
+    from gb_mcp.tools import ingest as ingest_mod
 
-    monkeypatch.setattr(server, "_docker_available", lambda: None)
-    monkeypatch.setattr(server, "_ensure_image", lambda: None)
-    monkeypatch.setattr(server, "_create_isolated_container", lambda: "cid")
-    monkeypatch.setattr(server, "_destroy_container", lambda _cid: None)
+    monkeypatch.setattr(ingest_mod, "_docker_available", lambda: None)
+    monkeypatch.setattr(ingest_mod, "_ensure_image", lambda: None)
+    monkeypatch.setattr(ingest_mod, "_create_isolated_container", lambda: "cid")
+    monkeypatch.setattr(ingest_mod, "_destroy_container", lambda _cid: None)
     monkeypatch.setattr(
-        server,
+        ingest_mod,
         "_validate_inside_container",
         lambda _cid, _data: {"valid": True, "reason": "ok"},
     )

@@ -96,8 +96,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:  # noqa: BLE001
                 self._send_json({"sent": False, "error": str(exc)}, 400)
                 return
-            pngs = result.pop("pngs", [])
-            result["pngs_b64"] = [base64.b64encode(png).decode("ascii") for png in pngs]
+            encode_input_media(result)
             self._send_json(result)
             return
         if self.path == "/ping":
@@ -142,6 +141,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+
+def encode_input_media(result: dict[str, Any]) -> dict[str, Any]:
+    """Replace pngs/gif bytes with at most one pngs_b64 and optional gif_b64."""
+    pngs = result.pop("pngs", [])
+    gif = result.pop("gif", None)
+    gifs = result.pop("gifs", None)
+    if not isinstance(pngs, list):
+        pngs = [pngs] if pngs else []
+    pngs = [bytes(item) for item in pngs if isinstance(item, (bytes, bytearray)) and item]
+    if gif is None and isinstance(gifs, list) and gifs:
+        gif = gifs[0]
+    elif gif is None and isinstance(gifs, (bytes, bytearray)):
+        gif = gifs
+    if not isinstance(gif, (bytes, bytearray)):
+        gif = None
+    else:
+        gif = bytes(gif)
+    if gif is None and len(pngs) > 1:
+        from gb_mcp.emulator.play_runtime import pack_action_media
+
+        media = pack_action_media(pngs, want_gif=True)
+        pngs = [bytes(item) for item in media.get("pngs") or [] if item]
+        packed_gif = media.get("gif")
+        gif = packed_gif if isinstance(packed_gif, (bytes, bytearray)) else None
+    elif len(pngs) > 1:
+        pngs = pngs[-1:]
+    result["pngs_b64"] = [base64.b64encode(item).decode("ascii") for item in pngs[:1]]
+    if gif:
+        result["gif_b64"] = base64.b64encode(gif).decode("ascii")
+    else:
+        result.pop("gif_b64", None)
+    return result
 
 
 def _rpc_cli(method: str, path: str) -> int:

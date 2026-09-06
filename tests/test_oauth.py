@@ -227,7 +227,8 @@ def test_pkce_authorize_token_initialize_and_tools_list(oauth_client: TestClient
     message = _jsonrpc_from_response(listed)
     assert message is not None
     names = [tool["name"] for tool in message["result"]["tools"]]
-    assert "list_subdirectories_for_email" in names
+    assert "list_games" in names
+    assert "list_subdirectories_for_email" not in names
 
 
 def test_wrong_code_verifier_fails(oauth_client: TestClient) -> None:
@@ -530,13 +531,13 @@ def test_oauth_token_email_claim_binds_omitted_tool_email(
         oauth_client,
         token=token,
         session_id=session_id,
-        name="list_subdirectories_for_email",
+        name="list_games",
         arguments={},
     )
-    assert payload["email"] == "oauth-user@example.com"
-    assert payload["count"] == 1
-    assert payload["subdirectories"][0]["subdirectory"] == name
+    assert payload["games"][0]["id"] == name
+    assert payload["games"][0]["title"] == "TETRIS"
     assert "model_request" not in payload
+    assert "email" not in payload
 
 
 def test_oauth_token_sub_claim_binds_omitted_tool_email(
@@ -555,11 +556,11 @@ def test_oauth_token_sub_claim_binds_omitted_tool_email(
         oauth_client,
         token=token,
         session_id=session_id,
-        name="list_subdirectories_for_email",
+        name="list_games",
         arguments={},
     )
-    assert payload["email"] == "sub-user@example.com"
-    assert payload["count"] == 1
+    assert payload["games"][0]["id"] == name
+    assert "email" not in payload
 
 
 def test_explicit_email_overrides_oauth_token_claims(
@@ -578,21 +579,11 @@ def test_explicit_email_overrides_oauth_token_claims(
         oauth_client,
         token=token,
         session_id=session_id,
-        name="list_subdirectories_for_email",
+        name="list_games",
         arguments={},
     )
-    listed_explicit = _call_tool(
-        oauth_client,
-        token=token,
-        session_id=session_id,
-        name="list_subdirectories_for_email",
-        arguments={"email": "owner@example.com"},
-    )
-    assert listed_token["email"] == "token@example.com"
-    assert listed_token["count"] == 0
-    assert listed_explicit["email"] == "owner@example.com"
-    assert listed_explicit["count"] == 1
-    assert listed_explicit["subdirectories"][0]["subdirectory"] == owner_name
+    assert listed_token.get("games") == []
+    assert "email" not in listed_token
 
 
 def test_static_bearer_omitted_email_returns_model_request(
@@ -603,10 +594,9 @@ def test_static_bearer_omitted_email_returns_model_request(
         oauth_client,
         token=TOKEN,
         session_id=session_id,
-        name="list_subdirectories_for_email",
+        name="list_games",
         arguments={},
     )
-    assert payload["count"] == 0
     assert payload["model_request"]["name"] == "email"
     assert "email" in payload["model_request"]["instruction"].lower()
 
@@ -643,7 +633,7 @@ def test_pkce_token_without_email_claim_asks_for_email(
         oauth_client,
         token=tokens["access_token"],
         session_id=session_id,
-        name="list_subdirectories_for_email",
+        name="list_games",
         arguments={},
     )
     assert payload["model_request"]["name"] == "email"
@@ -658,7 +648,7 @@ def test_omitted_email_does_not_bypass_bearer_auth(oauth_client: TestClient) -> 
             "id": 3,
             "method": "tools/call",
             "params": {
-                "name": "list_subdirectories_for_email",
+                "name": "list_games",
                 "arguments": {},
             },
         },

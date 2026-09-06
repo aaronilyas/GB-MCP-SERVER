@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+from pathlib import Path
 from typing import Any
 
 import jwt
@@ -11,6 +13,7 @@ from starlette.testclient import TestClient
 import db
 import server
 from gb_mcp import config
+from gb_mcp import http as gb_http
 from gb_mcp.http import (
     create_http_app,
     mcp_resource_url,
@@ -139,14 +142,9 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     listed_msg = _jsonrpc_from_response(listed)
     assert listed_msg is not None
     names = [tool["name"] for tool in listed_msg["result"]["tools"]]
-    assert "list_subdirectories_for_email" in names
-    assert "submit_gb_rom" in names
-    assert "begin_gb_rom_upload" in names
-    assert "get_gb_rom_upload" in names
-    assert "append_gb_rom_upload" in names
-    assert "append_gb_rom_upload_batch" in names
-    assert "finalize_gb_rom_upload" in names
-    assert "abort_gb_rom_upload" in names
+    assert set(names) == {"add_rom", "list_games", "boot", "play", "save", "stop"}
+    assert "begin_gb_rom_upload" not in names
+    assert "send_pyboy_input" not in names
 
     name = "d" * db.SUBDIRECTORY_NAME_LENGTH
     dest = roms_dir / name
@@ -163,8 +161,8 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
             "id": 3,
             "method": "tools/call",
             "params": {
-                "name": "list_subdirectories_for_email",
-                "arguments": {"email": "owner@example.com"},
+                "name": "list_games",
+                "arguments": {},
             },
         },
     )
@@ -175,9 +173,8 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     content = called_msg["result"]["content"]
     text = "".join(part.get("text", "") for part in content if part.get("type") == "text")
     payload = json.loads(text)
-    assert payload["email"] == "owner@example.com"
-    assert payload["count"] == 1
-    assert payload["subdirectories"][0]["subdirectory"] == name
+    assert payload["ok"] is False
+    assert payload["model_request"]["name"] == "email"
 
 
 def test_public_url_unset_does_not_crash(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -450,3 +447,143 @@ def test_well_known_on_www_host_matches_www_resource(
     body = response.json()
     assert body["resource"] == "https://www.gb-mcp-server.com/mcp"
     assert body["authorization_servers"] == ["https://www.gb-mcp-server.com"]
+
+
+@pytest.fixture
+def fake_http_docker(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(gb_http, "_docker_available", lambda: None)
+    monkeypatch.setattr(gb_http, "_ensure_image", lambda: None)
+    monkeypatch.setattr(gb_http, "_create_isolated_container", lambda: "cid")
+    monkeypatch.setattr(gb_http, "_destroy_container", lambda _cid: None)
+    monkeypatch.setattr(
+        gb_http,
+        "_validate_inside_container",
+        lambda _cid, _data: {"valid": True, "reason": "ok"},
+    )
+    return monkeypatch
+
+
+def _rom_dirs(roms_dir: Path) -> list[Path]:
+    return [p for p in roms_dir.iterdir() if p.is_dir() and not p.name.startswith(".")]
+
+
+def test_post_roms_rejects_missing_bearer(
+    http_client: TestClient, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    response = http_client.post(
+        "/roms",
+        headers={"Content-Type": "application/octet-stream"},
+        content=make_rom(),
+    )
+    assert response.status_code == 401
+    assert "www-authenticate" in response.headers
+    www = response.headers["www-authenticate"]
+    assert www.startswith("Bearer ")
+    assert "resource_metadata=" in www
+    assert "error=" in www
+    assert "error_description=" in www
+    assert response.json()["error"] == "invalid_token"
+    assert _rom_dirs(roms_dir) == []
+
+
+def test_post_roms_rejects_invalid_bearer(
+    http_client: TestClient, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    response = http_client.post(
+        "/roms",
+        headers={
+            "Authorization": "Bearer wrong-token",
+            "Content-Type": "application/octet-stream",
+        },
+        content=make_rom(),
+    )
+    assert response.status_code == 401
+    assert "www-authenticate" in response.headers
+    assert response.json()["error"] == "invalid_token"
+    assert _rom_dirs(roms_dir) == []
+
+
+def test_post_roms_options_does_not_require_bearer(http_client: TestClient) -> None:
+    response = http_client.options("/roms")
+    assert response.status_code != 401
+
+
+def test_post_roms_accepts_multipart_file(
+    http_client: TestClient, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    rom = make_rom(title=b"TETRIS")
+    response = http_client.post(
+        "/roms",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        files={"file": ("tetris.gb", rom, "application/octet-stream")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["saved"] is True
+    assert body["mapped"] is False
+    saved = roms_dir / body["subdirectory"] / "tetris.gb"
+    assert saved.read_bytes() == rom
+
+
+def test_post_roms_persists_with_static_bearer(
+    http_client: TestClient, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    rom = make_rom(title=b"TETRIS")
+    response = http_client.post(
+        "/roms",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json={
+            "filename": "tetris.gb",
+            "rom_base64": base64.b64encode(rom).decode(),
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["saved"] is True
+    assert body["mapped"] is False
+    assert "email" not in body
+    name = body["subdirectory"]
+    assert len(name) == db.SUBDIRECTORY_NAME_LENGTH
+    saved = roms_dir / name / "tetris.gb"
+    assert saved.is_file()
+    assert saved.read_bytes() == rom
+    assert body["validation"]["valid"] is True
+    with db.session_scope() as session:
+        assert db.list_subdirectories_for_email(session, "owner@example.com") == []
+
+
+def test_post_roms_maps_operator_jwt_email(
+    http_env, monkeypatch: pytest.MonkeyPatch, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    secret = "jwt-test-secret-32-bytes-minimum!"
+    monkeypatch.setenv("GB_MCP_JWT_SECRET", secret)
+    token = jwt.encode(
+        {"email": "owner@example.com"}, secret, algorithm="HS256"
+    )
+    rom = make_rom(title=b"TETRIS")
+    app = create_http_app(server.mcp)
+    with TestClient(app) as client:
+        response = client.post(
+            "/roms",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/octet-stream",
+            },
+            content=rom,
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["saved"] is True
+    assert body["mapped"] is True
+    assert body["email"] == "owner@example.com"
+    name = body["subdirectory"]
+    assert len(name) == db.SUBDIRECTORY_NAME_LENGTH
+    files = [p for p in (roms_dir / name).iterdir() if p.is_file() and not p.name.startswith(".")]
+    assert len(files) == 1
+    assert files[0].read_bytes() == rom
+    with db.session_scope() as session:
+        listed = db.list_subdirectories_for_email(session, "owner@example.com")
+        assert [row.name for row in listed] == [name]
