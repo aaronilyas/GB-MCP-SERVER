@@ -5,7 +5,7 @@ No numpy, no PyBoy. Safe to import from the MCP host image.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from gb_mcp.emulator.play_limits import (
@@ -568,3 +568,228 @@ def parse_play_input(payload: dict[str, Any], *, session_speed: int | None = Non
 HASH_FULL = DEFAULT_HASH_REGIONS["full"]
 HASH_BOTTOM = BOTTOM_REGION
 HASH_CENTER = CENTER_REGION
+
+# Public play arguments. `frames` defaults to one-tile hold/wait, not the
+# internal hold_frames default of 1. Mash without `frames` still uses the
+# existing max_frames cap. `until` is a public name, not UntilSpec.
+DEFAULT_PLAY_FRAMES = 16
+PUBLIC_UNTIL = frozenset({"battle", "textbox", "menu", "stable", "fade"})
+PUBLIC_MEDIA = frozenset({"image", "video"})
+_PUBLIC_UNTIL_TO_INTERNAL: dict[str, dict[str, Any]] = {
+    "battle": {
+        "on": "classifier",
+        "classifier": "battle_likely",
+        "classifier_polarity": "appears",
+    },
+    "textbox": {
+        "on": "classifier",
+        "classifier": "textbox_likely",
+        "classifier_polarity": "appears",
+    },
+    "menu": {
+        "on": "classifier",
+        "classifier": "start_menu_likely",
+        "classifier_polarity": "appears",
+    },
+    "stable": {"on": "stable"},
+    "fade": {"on": "pixel_delta_above", "region": list(DEFAULT_REGION)},
+}
+
+
+@dataclass(frozen=True)
+class PlayArgs:
+    """Public play arguments. Mash press/release and UntilSpec stay internal."""
+
+    buttons: tuple[str, ...] = ()
+    frames: int = DEFAULT_PLAY_FRAMES
+    gap: int = DEFAULT_GAP_FRAMES
+    mash: bool = False
+    steps: tuple[InputStep, ...] = ()
+    until: str | None = None
+    media: str = "image"
+
+
+def _normalize_bounded_int(
+    value: Any,
+    *,
+    name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    if value < minimum or value > maximum:
+        raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def _parse_public_until(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("until must be 'battle', 'textbox', 'menu', 'stable', or 'fade'")
+    until = value.strip().lower()
+    if until not in PUBLIC_UNTIL:
+        raise ValueError("until must be 'battle', 'textbox', 'menu', 'stable', or 'fade'")
+    return until
+
+
+def _parse_public_media(value: Any) -> str:
+    if value is None:
+        return "image"
+    if not isinstance(value, str):
+        raise ValueError("media must be 'image' or 'video'")
+    media = value.strip().lower()
+    if media not in PUBLIC_MEDIA:
+        raise ValueError("media must be 'image' or 'video'")
+    return media
+
+
+def _normalize_public_step(
+    index: int, step: Any, default_frames: int, default_gap: int
+) -> InputStep:
+    if not isinstance(step, dict):
+        raise ValueError(f"step {index}: each step must be an object with a buttons list")
+    if "buttons" not in step:
+        raise ValueError(f"step {index}: at least one button is required")
+    try:
+        buttons = normalize_buttons(step.get("buttons"), allow_empty=True)
+        frames = _normalize_bounded_int(
+            step.get("frames"),
+            name="frames",
+            default=default_frames,
+            minimum=1,
+            maximum=MAX_HOLD_FRAMES,
+        )
+        gap = _normalize_bounded_int(
+            step.get("gap"),
+            name="gap",
+            default=default_gap,
+            minimum=0,
+            maximum=MAX_GAP_FRAMES,
+        )
+    except ValueError as exc:
+        raise ValueError(f"step {index}: {exc}") from exc
+    return InputStep(
+        buttons=tuple(buttons),
+        hold_frames=frames,
+        gap_frames=gap,
+        wait=not buttons,
+    )
+
+
+def parse_play_args(payload: dict[str, Any]) -> PlayArgs:
+    """Validate public play arguments. Raises ValueError."""
+    if not isinstance(payload, dict):
+        raise ValueError("play arguments must be an object")
+
+    mash_raw = payload.get("mash")
+    if mash_raw is None:
+        mash = False
+    elif isinstance(mash_raw, bool):
+        mash = mash_raw
+    else:
+        raise ValueError("mash must be a boolean")
+
+    until = _parse_public_until(payload.get("until"))
+    media = _parse_public_media(payload.get("media"))
+    gap = _normalize_bounded_int(
+        payload.get("gap"),
+        name="gap",
+        default=DEFAULT_GAP_FRAMES,
+        minimum=0,
+        maximum=MAX_GAP_FRAMES,
+    )
+
+    buttons_arg = payload.get("buttons")
+    steps_arg = payload.get("steps")
+    has_buttons = buttons_arg is not None
+    has_steps = steps_arg is not None
+    if has_buttons and has_steps:
+        raise ValueError("provide either top-level buttons or steps, not both")
+    if mash and has_steps:
+        raise ValueError("provide either mash or steps, not both")
+    if not mash and not has_buttons and not has_steps:
+        raise ValueError("at least one button is required")
+
+    frames_default = MAX_FRAMES_PER_CALL if mash else DEFAULT_PLAY_FRAMES
+    frames = _normalize_bounded_int(
+        payload.get("frames"),
+        name="frames",
+        default=frames_default,
+        minimum=1,
+        maximum=MAX_HOLD_FRAMES,
+    )
+
+    if has_buttons:
+        buttons = tuple(normalize_buttons(buttons_arg, allow_empty=True))
+    else:
+        buttons = ()
+
+    steps: tuple[InputStep, ...]
+    if has_steps:
+        if not isinstance(steps_arg, list):
+            raise ValueError("steps must be a list of chord objects")
+        if not steps_arg:
+            raise ValueError("steps must not be empty")
+        if len(steps_arg) > MAX_INPUT_STEPS:
+            raise ValueError(f"steps cannot exceed {MAX_INPUT_STEPS}")
+        steps = tuple(
+            _normalize_public_step(index, step, frames, gap)
+            for index, step in enumerate(steps_arg)
+        )
+    else:
+        steps = ()
+
+    args = PlayArgs(
+        buttons=buttons,
+        frames=frames,
+        gap=gap,
+        mash=mash,
+        steps=steps,
+        until=until,
+        media=media,
+    )
+    play_input_from_args(args)
+    return args
+
+
+def play_input_from_args(args: PlayArgs) -> PlayInput:
+    """Map public PlayArgs onto the existing PlayInput engine schema."""
+    payload: dict[str, Any] = {
+        "gap_frames": args.gap,
+        "emulation_speed": DEFAULT_EMULATION_SPEED,
+        "screenshot_scale": DEFAULT_SCREENSHOT_SCALE,
+        "screenshot_mode": DEFAULT_SCREENSHOT_MODE,
+    }
+    if args.until is not None:
+        spec = _PUBLIC_UNTIL_TO_INTERNAL.get(args.until)
+        if spec is None:
+            raise ValueError(
+                "until must be 'battle', 'textbox', 'menu', 'stable', or 'fade'"
+            )
+        payload["until"] = dict(spec)
+    if args.mash:
+        payload["macro"] = "mash"
+        payload["max_frames"] = args.frames
+    elif args.steps:
+        payload["steps"] = [
+            {
+                "buttons": list(step.buttons),
+                "hold_frames": step.hold_frames,
+                "gap_frames": step.gap_frames,
+                "wait": step.wait,
+            }
+            for step in args.steps
+        ]
+    elif not args.buttons:
+        payload["wait"] = True
+        payload["hold_frames"] = args.frames
+    else:
+        payload["buttons"] = list(args.buttons)
+        payload["hold_frames"] = args.frames
+    play = parse_play_input(payload)
+    return replace(play, extra={"media": args.media})
