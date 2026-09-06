@@ -2,12 +2,13 @@
 
 Stdio remains the default transport. This module is imported by `server.py` so
 HTTP mode can wrap the same MCP tools and resources without baking a hostname
-into the process. `/mcp` accepts a static bearer / operator JWT or an access
-token from the in-process OAuth authorization server.
+into the process. `/mcp` and `POST /roms` accept a static bearer / operator JWT
+or an access token from the in-process OAuth authorization server.
 """
 
 from __future__ import annotations
 
+import base64
 import contextvars
 import secrets
 from collections.abc import Iterator
@@ -18,7 +19,7 @@ from urllib.parse import urlparse
 import jwt
 from jwt.exceptions import PyJWTError
 from starlette.applications import Starlette
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, UploadFile
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
@@ -28,7 +29,16 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from mcp.server import MCPServer
 from mcp.server.transport_security import TransportSecuritySettings
 
+import db
 from gb_mcp import config
+from gb_mcp.gb.header import assert_rom_playable
+from gb_mcp.isolation.docker import (
+    _create_isolated_container,
+    _destroy_container,
+    _docker_available,
+    _ensure_image,
+    _validate_inside_container,
+)
 from gb_mcp.oauth import (
     MCP_SCOPE,
     authorization_server_payload,
@@ -40,10 +50,16 @@ from gb_mcp.oauth import (
     protected_resource_fields,
     reset_oauth_state,
 )
+from gb_mcp.storage.roms import (
+    _allocate_subdirectory_name,
+    _persist_validated_rom,
+    _sanitize_filename,
+)
 
 _WELL_KNOWN_PRM = "/.well-known/oauth-protected-resource"
 _WELL_KNOWN_AS = "/.well-known/oauth-authorization-server"
 _WELL_KNOWN_OIDC = "/.well-known/openid-configuration"
+_ROMS_PATH = "/roms"
 _JWT_ALGORITHMS = ["HS256"]
 _attached_servers: set[int] = set()
 # Application identity from the current access token. Not transport auth.
@@ -330,18 +346,24 @@ class RootMcpAliasMiddleware:
 
 
 class BearerAuthMiddleware:
-    """Require a bearer token on the MCP HTTP path. Does not buffer SSE bodies."""
+    """Require a bearer token on `/mcp` and `/roms`. Does not buffer SSE bodies.
+
+    OPTIONS is admitted without a bearer so CORS preflight matches `/mcp`.
+    """
 
     def __init__(self, app: ASGIApp, mcp_path: str) -> None:
         self.app = app
         self.mcp_path = mcp_path.rstrip("/") or "/mcp"
+
+    def _protected_path(self, path: str) -> bool:
+        return path == self.mcp_path or path == _ROMS_PATH
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         path = (scope.get("path") or "").rstrip("/") or "/"
-        if path != self.mcp_path:
+        if not self._protected_path(path):
             await self.app(scope, receive, send)
             return
         if scope.get("method") == "OPTIONS":
@@ -384,8 +406,231 @@ def _cors_middleware() -> Middleware | None:
     )
 
 
+def _media_type(request: Request) -> str:
+    return (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+
+
+def _filename_from_request(request: Request) -> str | None:
+    query = request.query_params.get("filename")
+    if isinstance(query, str) and query.strip():
+        return query
+    disposition = request.headers.get("content-disposition")
+    if not disposition:
+        return None
+    for part in disposition.split(";"):
+        item = part.strip()
+        if item.lower().startswith("filename="):
+            value = item.split("=", 1)[1].strip().strip('"')
+            return value or None
+    return None
+
+
+def _decode_rom_base64(rom_base64: str) -> bytes:
+    if len(rom_base64) > config.MAX_ROM_B64_CHARS:
+        raise ValueError(
+            f"ROM payload exceeds maximum encoded size of {config.MAX_ROM_B64_CHARS} "
+            f"base64 characters ({config.MAX_ROM_BYTES} bytes decoded)"
+        )
+    try:
+        return base64.b64decode(rom_base64, validate=True)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"invalid base64 ROM payload: {exc}") from None
+
+
+def _require_rom_bytes(rom_bytes: bytes) -> bytes:
+    if not rom_bytes:
+        raise ValueError("ROM payload is empty")
+    if len(rom_bytes) > config.MAX_ROM_BYTES:
+        raise ValueError(f"ROM exceeds maximum size of {config.MAX_ROM_BYTES} bytes")
+    return rom_bytes
+
+
+async def _rom_from_json(request: Request) -> tuple[bytes, str]:
+    try:
+        payload = await request.json()
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"invalid JSON body: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body must be an object")
+    filename = payload.get("filename")
+    if not isinstance(filename, str) or not filename.strip():
+        filename = "rom.gb"
+    raw = payload.get("rom_base64")
+    if not isinstance(raw, str) or not raw:
+        raise ValueError("rom_base64 is required")
+    return _decode_rom_base64(raw), filename
+
+
+async def _rom_from_multipart(request: Request) -> tuple[bytes, str]:
+    async with request.form(max_part_size=config.MAX_ROM_BYTES) as form:
+        filename = None
+        named = form.get("filename")
+        if isinstance(named, str) and named.strip():
+            filename = named
+        upload: UploadFile | None = None
+        for key in ("file", "rom", "rom_file"):
+            candidate = form.get(key)
+            if isinstance(candidate, UploadFile):
+                upload = candidate
+                break
+        if upload is None:
+            for value in form.values():
+                if isinstance(value, UploadFile):
+                    upload = value
+                    break
+        if upload is not None:
+            data = await upload.read()
+            return data, filename or upload.filename or "rom.gb"
+        raw = form.get("rom_base64")
+        if isinstance(raw, str) and raw:
+            return _decode_rom_base64(raw), filename or "rom.gb"
+        raise ValueError("multipart body must include a ROM file or rom_base64")
+
+
+async def _rom_from_raw(request: Request) -> tuple[bytes, str]:
+    data = await request.body()
+    return data, _filename_from_request(request) or "rom.gb"
+
+
+async def _read_rom_payload(request: Request) -> tuple[bytes, str]:
+    media = _media_type(request)
+    if media == "application/json":
+        rom_bytes, filename = await _rom_from_json(request)
+    elif media == "multipart/form-data":
+        rom_bytes, filename = await _rom_from_multipart(request)
+    else:
+        rom_bytes, filename = await _rom_from_raw(request)
+    return _require_rom_bytes(rom_bytes), filename
+
+
+def _run_isolated_validation(rom_bytes: bytes) -> dict[str, Any]:
+    """Container up first, then ROM bytes via stdin docker exec. Network none."""
+    container_id: str | None = None
+    try:
+        _docker_available()
+        _ensure_image()
+        container_id = _create_isolated_container()
+        return _validate_inside_container(container_id, rom_bytes)
+    finally:
+        if container_id:
+            _destroy_container(container_id)
+
+
+def _invalid_rom_result(
+    validation: dict[str, Any], *, error: str | None = None
+) -> dict[str, Any]:
+    return {
+        "accepted": False,
+        "saved": False,
+        "subdirectory": None,
+        "mapped": False,
+        "validation": validation,
+        "error": error or validation.get("reason", "not a valid Game Boy ROM"),
+    }
+
+
+def _reject_unplayable_or_invalid(
+    rom_bytes: bytes, validation: dict[str, Any]
+) -> dict[str, Any] | None:
+    if not validation.get("valid"):
+        return _invalid_rom_result(validation)
+    try:
+        assert_rom_playable(rom_bytes)
+    except ValueError as exc:
+        rejected = dict(validation)
+        rejected["valid"] = False
+        rejected["reason"] = str(exc)
+        rejected.pop("size_note", None)
+        return _invalid_rom_result(rejected, error=str(exc))
+    return None
+
+
+def _persist_and_map(
+    rom_bytes: bytes, filename: str, validation: dict[str, Any]
+) -> dict[str, Any]:
+    safe_name = _sanitize_filename(filename)
+    subdirectory = _allocate_subdirectory_name()
+    dest = _persist_validated_rom(subdirectory, safe_name, rom_bytes)
+    result: dict[str, Any] = {
+        "accepted": True,
+        "saved": True,
+        "path": str(dest.relative_to(config.ROOT)),
+        "subdirectory": subdirectory,
+        "mapped": False,
+        "validation": validation,
+    }
+    identity = current_oauth_identity()
+    if identity is None:
+        return result
+    try:
+        email = db.normalize_email(identity)
+    except ValueError:
+        return result
+    try:
+        with db.session_scope() as session:
+            mapped = db.map_subdirectory_to_email(session, subdirectory, email)
+            result["email"] = mapped.user.email
+        result["mapped"] = True
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = f"ROM saved but email could not be mapped: {exc}"
+    return result
+
+
+async def post_roms(request: Request) -> Response:
+    """Validate a ROM in isolation and persist under ``roms/<32-hex>/``."""
+    try:
+        rom_bytes, filename = await _read_rom_payload(request)
+    except ValueError as exc:
+        return JSONResponse(
+            {
+                "accepted": False,
+                "saved": False,
+                "subdirectory": None,
+                "mapped": False,
+                "error": str(exc),
+            },
+            status_code=400,
+        )
+
+    try:
+        validation = _run_isolated_validation(rom_bytes)
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {
+                "accepted": False,
+                "saved": False,
+                "subdirectory": None,
+                "mapped": False,
+                "error": str(exc),
+            },
+            status_code=503,
+        )
+
+    rejected = _reject_unplayable_or_invalid(rom_bytes, validation)
+    if rejected is not None:
+        return JSONResponse(rejected, status_code=400)
+
+    try:
+        return JSONResponse(_persist_and_map(rom_bytes, filename, validation))
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            {
+                "accepted": False,
+                "saved": False,
+                "subdirectory": None,
+                "mapped": False,
+                "validation": validation,
+                "error": f"failed to save ROM: {exc}",
+            },
+            status_code=500,
+        )
+
+
 def attach_public_routes(mcp_server: MCPServer) -> None:
-    """Register unauthenticated discovery and OAuth routes. Idempotent."""
+    """Register discovery, OAuth, and HTTP ROM ingest routes. Idempotent.
+
+    ``POST /roms`` is registered here; BearerAuthMiddleware enforces auth.
+    """
     marker = id(mcp_server)
     if marker in _attached_servers:
         return
@@ -402,6 +647,7 @@ def attach_public_routes(mcp_server: MCPServer) -> None:
     mcp_server.custom_route("/authorize", methods=["GET", "POST"])(authorize_endpoint)
     mcp_server.custom_route("/token", methods=["POST"])(token_endpoint)
     mcp_server.custom_route("/register", methods=["POST"])(register_endpoint)
+    mcp_server.custom_route(_ROMS_PATH, methods=["POST"])(post_roms)
 
 
 def create_http_app(mcp_server: MCPServer) -> Starlette:
