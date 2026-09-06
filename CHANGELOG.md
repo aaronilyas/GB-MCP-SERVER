@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] — 2026-09-06
+
+### Model-facing catalog shrink
+
+- MCP `tools/list` is six tools: `add_rom`, `list_games`, `boot`, `play`, `save`, `stop`. The model no longer sees chunked upload tools, `map_subdirectory_to_email`, `ping_pyboy`, or the old play names (`submit_gb_rom`, `list_subdirectories_for_email`, `load_subdirectory_rom`, `reset_pyboy`, `send_pyboy_input`, `save_battery`, `stop_pyboy`).
+- After `boot`, `play` / `save` / `stop` take no email or subdirectory. Identity comes from the OAuth session bind. Large dumps use `POST /roms`, not chat chunks.
+- Play replies are `{ok, frames, stopped, game}` plus one 4× PNG or one short GIF. The model no longer sees hashes, OCR, screenshot modes, idle countdowns, or `battle_likely`.
+- Resources are `gb://how-to-play`, `gb://screen`, `gb://session`. `gb://usage` and `gb://users/{email}/...` are gone. Server `instructions` match `gb://how-to-play`.
+
 ## [Unreleased] — 2026-09-05
 
 ### Play-session LCD, classifiers, hold abort, and email
