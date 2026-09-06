@@ -505,19 +505,17 @@ def test_public_shaping_of_play_dict_does_not_leak_hashes() -> None:
         assert key not in public
 
 
-def test_submit_email_maps_without_map_tool(fake_docker_submit, isolated_db, roms_dir: Path) -> None:
-    """Case 12: submit + email creates the mapping without map_subdirectory_to_email."""
+def test_add_rom_maps_without_map_tool(fake_docker_submit, isolated_db, roms_dir: Path) -> None:
+    """Case 12: add_rom maps from OAuth identity; no map tool on the catalog."""
     import server
+    from gb_mcp.http import oauth_token_claims
     from rom_builder import make_rom as _make
 
-    result = server.submit_gb_rom(
-        __import__("base64").b64encode(_make()).decode(),
-        email="Owner@Example.com",
-    )
+    with oauth_token_claims({"email": "Owner@Example.com"}):
+        result = server.add_rom(__import__("base64").b64encode(_make()).decode())
     assert result["accepted"] is True
     assert result["mapped"] is True
-    assert result["email"] == "owner@example.com"
-    name = result["subdirectory"]
+    name = result["id"]
     with db.session_scope() as session:
         row = db.get_subdirectory_for_email(session, name, "owner@example.com")
     assert row is not None
@@ -525,14 +523,14 @@ def test_submit_email_maps_without_map_tool(fake_docker_submit, isolated_db, rom
 
 @pytest.fixture
 def fake_docker_submit(monkeypatch: pytest.MonkeyPatch):
-    import server
+    from gb_mcp.tools import ingest as ingest_mod
 
-    monkeypatch.setattr(server, "_docker_available", lambda: None)
-    monkeypatch.setattr(server, "_ensure_image", lambda: None)
-    monkeypatch.setattr(server, "_create_isolated_container", lambda: "cid")
-    monkeypatch.setattr(server, "_destroy_container", lambda _cid: None)
+    monkeypatch.setattr(ingest_mod, "_docker_available", lambda: None)
+    monkeypatch.setattr(ingest_mod, "_ensure_image", lambda: None)
+    monkeypatch.setattr(ingest_mod, "_create_isolated_container", lambda: "cid")
+    monkeypatch.setattr(ingest_mod, "_destroy_container", lambda _cid: None)
     monkeypatch.setattr(
-        server,
+        ingest_mod,
         "_validate_inside_container",
         lambda _cid, _data: {"valid": True, "reason": "ok"},
     )

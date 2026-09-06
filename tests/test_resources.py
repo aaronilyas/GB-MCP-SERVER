@@ -1,30 +1,13 @@
 from __future__ import annotations
 
-import inspect
 from pathlib import Path
 
 import db
 import server
+from gb_mcp.contract import HOW_TO_PLAY
+from gb_mcp.http import oauth_token_claims
 
 from rom_builder import make_rom
-
-_TOOL_NAMES = (
-    "submit_gb_rom",
-    "begin_gb_rom_upload",
-    "get_gb_rom_upload",
-    "append_gb_rom_upload",
-    "append_gb_rom_upload_batch",
-    "finalize_gb_rom_upload",
-    "abort_gb_rom_upload",
-    "map_subdirectory_to_email",
-    "list_subdirectories_for_email",
-    "load_subdirectory_rom",
-    "reset_pyboy",
-    "send_pyboy_input",
-    "ping_pyboy",
-    "save_battery",
-    "stop_pyboy",
-)
 
 _OPS_SUBSTRINGS = (
     "GB_MCP_BEARER_TOKEN",
@@ -47,73 +30,52 @@ def _mapped_rom(roms_dir: Path, *, email: str = "owner@example.com", name: str |
     return name
 
 
-def test_owned_roms_resource(isolated_db, roms_dir: Path) -> None:
-    name = _mapped_rom(roms_dir)
-    result = server.owned_roms_resource("Owner@Example.com")
-    assert result["email"] == "owner@example.com"
-    assert result["count"] == 1
-    assert result["subdirectories"][0]["subdirectory"] == name
-    assert result["subdirectories"][0]["games"][0]["title"] == "TETRIS"
-
-
-def test_rom_header_resource_requires_ownership(isolated_db, roms_dir: Path) -> None:
-    name = _mapped_rom(roms_dir)
-    denied = server.rom_header_resource("other@example.com", name)
-    assert "error" in denied
-    assert "not mapped" in denied["error"]
-
-    header = server.rom_header_resource("owner@example.com", name)
-    assert header["email"] == "owner@example.com"
-    assert header["subdirectory"] == name
-    assert header["games"][0]["title"] == "TETRIS"
-    assert header["games"][0]["platform"] == "Game Boy"
-
-
-def test_session_status_resource(isolated_db, roms_dir: Path, pyboy_manager) -> None:
-    idle = server.session_status_resource("owner@example.com")
-    assert idle == {"email": "owner@example.com", "running": False}
-
-    name = _mapped_rom(roms_dir)
-    server.load_subdirectory_rom("owner@example.com", name)
-    live = server.session_status_resource("Owner@Example.com")
-    assert live["running"] is True
-    assert live["email"] == "owner@example.com"
-    assert live["subdirectory"] == name
-    assert live["rom"] == "tetris.gb"
-
-
-def test_usage_resource_is_static_markdown_howto() -> None:
-    body = server.usage_resource()
-    assert isinstance(body, str)
-    assert body.strip()
-    for name in _TOOL_NAMES:
-        assert name in body
-
-    assert inspect.signature(server.usage_resource).parameters == {}
+def test_resource_uris() -> None:
     resources = {str(item.uri): item for item in server.mcp._resource_manager.list_resources()}
-    usage = resources["gb://usage"]
-    assert "{" not in str(usage.uri)
-    assert usage.mime_type == "text/markdown"
+    assert set(resources) == {"gb://how-to-play", "gb://screen", "gb://session"}
+    assert "gb://usage" not in resources
     templates = [item.uri_template for item in server.mcp._resource_manager.list_templates()]
-    assert "gb://usage" not in templates
+    assert templates == []
+    assert resources["gb://how-to-play"].mime_type == "text/markdown"
 
 
-def test_usage_resource_body_is_stable() -> None:
-    first = server.usage_resource()
-    second = server.usage_resource()
-    assert first == second
-    assert first == server._USAGE_GUIDE
-
-
-def test_usage_resource_omits_ops_secrets() -> None:
-    body = server.usage_resource()
+def test_how_to_play_matches_instructions() -> None:
+    body = server.how_to_play_resource()
+    assert body == HOW_TO_PLAY
+    assert body == server.mcp.instructions
     for needle in _OPS_SUBSTRINGS:
         assert needle not in body, needle
+    for old in (
+        "blake2s",
+        "battle_likely",
+        "begin_gb_rom_upload",
+        "ping_pyboy",
+        "bearer",
+        "send_pyboy_input",
+    ):
+        assert old not in body
 
 
-def test_usage_resource_describes_unplayable_replace() -> None:
-    body = server.usage_resource()
-    assert "playable" in body
-    assert "subdirectory" in body
-    assert "sandbox attachment path" in body
-    assert "finalize_gb_rom_upload" in body
+def test_session_resource_idle_and_live(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    with oauth_token_claims({"email": "owner@example.com"}):
+        idle = server.session_resource()
+        assert idle["stopped"] is True or idle["ok"] is False
+        assert "email" not in idle
+        _mapped_rom(roms_dir)
+        server.boot(title="TETRIS")
+        live = server.session_resource()
+    assert live["ok"] is True
+    assert live["stopped"] is False
+    assert "email" not in live
+    assert "subdirectory" not in live
+    assert "rom_path" not in live
+
+
+def test_screen_resource_returns_png(isolated_db, roms_dir: Path, pyboy_manager) -> None:
+    _mapped_rom(roms_dir)
+    with oauth_token_claims({"email": "owner@example.com"}):
+        server.boot(title="TETRIS")
+        shot = server.screen_resource()
+    assert getattr(shot, "data", None) or isinstance(shot, dict)
+    if not isinstance(shot, dict):
+        assert shot.data.startswith(b"\x89PNG")

@@ -142,14 +142,9 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     listed_msg = _jsonrpc_from_response(listed)
     assert listed_msg is not None
     names = [tool["name"] for tool in listed_msg["result"]["tools"]]
-    assert "list_subdirectories_for_email" in names
-    assert "submit_gb_rom" in names
-    assert "begin_gb_rom_upload" in names
-    assert "get_gb_rom_upload" in names
-    assert "append_gb_rom_upload" in names
-    assert "append_gb_rom_upload_batch" in names
-    assert "finalize_gb_rom_upload" in names
-    assert "abort_gb_rom_upload" in names
+    assert set(names) == {"add_rom", "list_games", "boot", "play", "save", "stop"}
+    assert "begin_gb_rom_upload" not in names
+    assert "send_pyboy_input" not in names
 
     name = "d" * db.SUBDIRECTORY_NAME_LENGTH
     dest = roms_dir / name
@@ -166,8 +161,8 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
             "id": 3,
             "method": "tools/call",
             "params": {
-                "name": "list_subdirectories_for_email",
-                "arguments": {"email": "owner@example.com"},
+                "name": "list_games",
+                "arguments": {},
             },
         },
     )
@@ -178,9 +173,8 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     content = called_msg["result"]["content"]
     text = "".join(part.get("text", "") for part in content if part.get("type") == "text")
     payload = json.loads(text)
-    assert payload["email"] == "owner@example.com"
-    assert payload["count"] == 1
-    assert payload["subdirectories"][0]["subdirectory"] == name
+    assert payload["ok"] is False
+    assert payload["model_request"]["name"] == "email"
 
 
 def test_public_url_unset_does_not_crash(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
