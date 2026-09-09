@@ -119,6 +119,8 @@ def test_public_catalog_is_six_tools() -> None:
 
 
 def test_email_arg_only_on_list_boot_add_rom() -> None:
+    from gb_mcp.app import _EMAIL_DESCRIPTION
+
     tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     assert set(tools) == set(_PUBLIC_TOOL_NAMES)
     assert len(tools) == 6
@@ -127,10 +129,15 @@ def test_email_arg_only_on_list_boot_add_rom() -> None:
         assert needle not in blob, needle
     for name in ("list_games", "boot", "add_rom"):
         schema = tools[name].parameters or {}
-        assert "email" in schema.get("properties", {})
+        email = (schema.get("properties") or {}).get("email") or {}
+        assert email.get("type") == "string"
+        assert email.get("description") == _EMAIL_DESCRIPTION
         assert "email" not in (schema.get("required") or [])
+        assert schema.get("additionalProperties") is True
     for name in ("play", "save", "stop"):
-        assert "email" not in tools[name].parameters.get("properties", {})
+        schema = tools[name].parameters or {}
+        assert "email" not in schema.get("properties", {})
+        assert schema.get("additionalProperties") is not True
 
 
 def test_instructions_match_how_to_play() -> None:

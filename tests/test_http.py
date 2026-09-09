@@ -141,10 +141,23 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     assert listed.status_code == 200
     listed_msg = _jsonrpc_from_response(listed)
     assert listed_msg is not None
-    names = [tool["name"] for tool in listed_msg["result"]["tools"]]
+    tools = {tool["name"]: tool for tool in listed_msg["result"]["tools"]}
+    names = list(tools)
     assert set(names) == {"add_rom", "list_games", "boot", "play", "save", "stop"}
     assert "begin_gb_rom_upload" not in names
     assert "send_pyboy_input" not in names
+    from gb_mcp.app import _EMAIL_DESCRIPTION
+
+    for name in ("list_games", "boot", "add_rom"):
+        schema = tools[name].get("inputSchema") or {}
+        email = (schema.get("properties") or {}).get("email") or {}
+        assert email.get("type") == "string"
+        assert email.get("description") == _EMAIL_DESCRIPTION
+        assert "email" not in (schema.get("required") or [])
+        assert schema.get("additionalProperties") is True
+    for name in ("play", "save", "stop"):
+        schema = tools[name].get("inputSchema") or {}
+        assert "email" not in (schema.get("properties") or {})
 
     name = "d" * db.SUBDIRECTORY_NAME_LENGTH
     dest = roms_dir / name
@@ -211,6 +224,46 @@ def test_list_games_explicit_email_with_static_bearer(
     assert payload["ok"] is True
     assert payload["games"][0]["id"] == name
     assert payload["games"][0]["title"] == "TETRIS"
+    assert "model_request" not in payload
+    assert "email" not in payload
+
+
+def test_list_games_keeps_email_among_extra_properties(
+    http_client: TestClient, isolated_db, roms_dir: Path
+) -> None:
+    session_id = _initialize(http_client)
+    name = "f" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / name
+    dest.mkdir()
+    (dest / "tetris.gb").write_bytes(make_rom(title=b"TETRIS"))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "owner@example.com")
+
+    called = http_client.post(
+        "/mcp",
+        headers=_mcp_headers(session_id=session_id),
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "list_games",
+                "arguments": {
+                    "email": "owner@example.com",
+                    "unexpected": "must-not-strip-email",
+                },
+            },
+        },
+    )
+    assert called.status_code == 200
+    called_msg = _jsonrpc_from_response(called)
+    assert called_msg is not None
+    assert "error" not in called_msg
+    content = called_msg["result"]["content"]
+    text = "".join(part.get("text", "") for part in content if part.get("type") == "text")
+    payload = json.loads(text)
+    assert payload["ok"] is True
+    assert payload["games"][0]["id"] == name
     assert "model_request" not in payload
     assert "email" not in payload
 

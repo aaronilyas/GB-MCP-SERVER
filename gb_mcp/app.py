@@ -25,6 +25,60 @@ _EMAIL_DESCRIPTION = (
     "if you do not already have it. Do not invent an email."
 )
 
+_IDENTITY_EMAIL_TOOLS = ("list_games", "boot", "add_rom")
+_SESSION_TOOLS = ("play", "save", "stop")
+
+
+def _email_input_schema() -> dict[str, Any]:
+    return {"type": "string", "description": _EMAIL_DESCRIPTION}
+
+
+def _passthrough_explicit_email(tool: Any) -> None:
+    """Keep JSON-RPC ``email`` even if the generated arg model omitted it."""
+    metadata = tool.fn_metadata
+    original = metadata.validate_arguments
+
+    def validate_arguments(arguments_to_validate: dict[str, Any]) -> dict[str, Any]:
+        payload = arguments_to_validate if isinstance(arguments_to_validate, dict) else {}
+        explicit = payload.get("email") if isinstance(payload, dict) else None
+        kwargs = original(arguments_to_validate)
+        if isinstance(explicit, str) and explicit.strip():
+            kwargs["email"] = explicit
+        return kwargs
+
+    object.__setattr__(metadata, "validate_arguments", validate_arguments)
+
+
+def publish_identity_email_schemas() -> None:
+    """Advertise optional ``email`` on list/boot/add_rom and keep extras.
+
+    Hosted connector catalogs copy ``tools/list``. A missing ``email`` field
+    plus ``additionalProperties: false`` strips the argument before
+    ``require_email(explicit=email)``. Session tools stay email-less.
+    """
+    email_schema = _email_input_schema()
+    for name in _IDENTITY_EMAIL_TOOLS:
+        tool = mcp._tool_manager.get_tool(name)
+        if tool is None:
+            continue
+        schema = tool.parameters
+        properties = schema.setdefault("properties", {})
+        properties["email"] = dict(email_schema)
+        required = [item for item in (schema.get("required") or []) if item != "email"]
+        if required:
+            schema["required"] = required
+        else:
+            schema.pop("required", None)
+        schema["type"] = "object"
+        schema["additionalProperties"] = True
+        _passthrough_explicit_email(tool)
+    for name in _SESSION_TOOLS:
+        tool = mcp._tool_manager.get_tool(name)
+        if tool is None:
+            continue
+        properties = (tool.parameters or {}).get("properties") or {}
+        properties.pop("email", None)
+
 
 @mcp.tool(
     name="add_rom",
@@ -201,4 +255,5 @@ def session_resource() -> dict[str, Any]:
     return session_body()
 
 
+publish_identity_email_schemas()
 attach_public_routes(mcp)

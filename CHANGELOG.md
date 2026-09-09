@@ -6,6 +6,7 @@
 
 - OAuth consent collects an email. Successful access tokens carry that address as `email` plus an email-shaped `sub`. Success no longer issues `gb-mcp-user`.
 - Optional `email` is restored on `list_games`, `boot`, and `add_rom`. Explicit `email` wins over token identity. `play` / `save` / `stop` stay session-bound and take no email argument.
+- `tools/list` publishes `email` as an optional string (same description as `_EMAIL_DESCRIPTION`) on those three tools and sets `additionalProperties: true` so a hosted catalog cannot drop an explicit email. Extra `email` still reaches `require_email(explicit=email)`. `play` / `save` / `stop` stay email-less.
 - `POST /roms` maps from the token email or an optional JSON/form `email`.
 - If `email` is omitted and there is no token identity, those tools return a structured `model_request` asking for email — do not invent one (for example `trainer@x.ai`).
 - The six-tool catalog is unchanged: `add_rom`, `list_games`, `boot`, `play`, `save`, `stop`.
