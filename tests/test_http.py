@@ -177,6 +177,44 @@ def test_initialize_tools_list_and_tool_call_with_bearer(
     assert payload["model_request"]["name"] == "email"
 
 
+def test_list_games_explicit_email_with_static_bearer(
+    http_client: TestClient, isolated_db, roms_dir: Path
+) -> None:
+    session_id = _initialize(http_client)
+    name = "e" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / name
+    dest.mkdir()
+    (dest / "tetris.gb").write_bytes(make_rom(title=b"TETRIS"))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "owner@example.com")
+
+    called = http_client.post(
+        "/mcp",
+        headers=_mcp_headers(session_id=session_id),
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "list_games",
+                "arguments": {"email": "owner@example.com"},
+            },
+        },
+    )
+    assert called.status_code == 200
+    called_msg = _jsonrpc_from_response(called)
+    assert called_msg is not None
+    assert "error" not in called_msg
+    content = called_msg["result"]["content"]
+    text = "".join(part.get("text", "") for part in content if part.get("type") == "text")
+    payload = json.loads(text)
+    assert payload["ok"] is True
+    assert payload["games"][0]["id"] == name
+    assert payload["games"][0]["title"] == "TETRIS"
+    assert "model_request" not in payload
+    assert "email" not in payload
+
+
 def test_public_url_unset_does_not_crash(http_env, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GB_MCP_PUBLIC_URL", raising=False)
     assert config.public_url() is None
@@ -587,3 +625,89 @@ def test_post_roms_maps_operator_jwt_email(
     with db.session_scope() as session:
         listed = db.list_subdirectories_for_email(session, "owner@example.com")
         assert [row.name for row in listed] == [name]
+
+
+def test_post_roms_maps_json_email_with_static_bearer(
+    http_client: TestClient, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    rom = make_rom(title=b"TETRIS")
+    response = http_client.post(
+        "/roms",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        json={
+            "filename": "tetris.gb",
+            "rom_base64": base64.b64encode(rom).decode(),
+            "email": "Owner@Example.com",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["saved"] is True
+    assert body["mapped"] is True
+    assert body["email"] == "owner@example.com"
+    name = body["subdirectory"]
+    saved = roms_dir / name / "tetris.gb"
+    assert saved.read_bytes() == rom
+    with db.session_scope() as session:
+        listed = db.list_subdirectories_for_email(session, "owner@example.com")
+        assert [row.name for row in listed] == [name]
+
+
+def test_post_roms_maps_multipart_form_email(
+    http_client: TestClient, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    rom = make_rom(title=b"TETRIS")
+    response = http_client.post(
+        "/roms",
+        headers={"Authorization": f"Bearer {TOKEN}"},
+        data={"email": "owner@example.com"},
+        files={"file": ("tetris.gb", rom, "application/octet-stream")},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["saved"] is True
+    assert body["mapped"] is True
+    assert body["email"] == "owner@example.com"
+    name = body["subdirectory"]
+    saved = roms_dir / name / "tetris.gb"
+    assert saved.read_bytes() == rom
+    with db.session_scope() as session:
+        listed = db.list_subdirectories_for_email(session, "owner@example.com")
+        assert [row.name for row in listed] == [name]
+
+
+def test_post_roms_json_email_overrides_token_email(
+    http_env, monkeypatch: pytest.MonkeyPatch, isolated_db, roms_dir: Path, fake_http_docker
+) -> None:
+    secret = "jwt-test-secret-32-bytes-minimum!"
+    monkeypatch.setenv("GB_MCP_JWT_SECRET", secret)
+    token = jwt.encode(
+        {"email": "token@example.com"}, secret, algorithm="HS256"
+    )
+    rom = make_rom(title=b"TETRIS")
+    app = create_http_app(server.mcp)
+    with TestClient(app) as client:
+        response = client.post(
+            "/roms",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "filename": "tetris.gb",
+                "rom_base64": base64.b64encode(rom).decode(),
+                "email": "owner@example.com",
+            },
+        )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["accepted"] is True
+    assert body["saved"] is True
+    assert body["mapped"] is True
+    assert body["email"] == "owner@example.com"
+    name = body["subdirectory"]
+    saved = roms_dir / name / "tetris.gb"
+    assert saved.read_bytes() == rom
+    with db.session_scope() as session:
+        listed = db.list_subdirectories_for_email(session, "owner@example.com")
+        assert [row.name for row in listed] == [name]
+        assert db.list_subdirectories_for_email(session, "token@example.com") == []

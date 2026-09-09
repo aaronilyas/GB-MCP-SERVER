@@ -79,7 +79,7 @@ def _register(
     return body
 
 
-def _authorize_and_allow(
+def _get_authorize_page(
     client: TestClient,
     *,
     client_id: str,
@@ -87,7 +87,7 @@ def _authorize_and_allow(
     challenge: str,
     resource: str = PUBLIC_RESOURCE,
     state: str = "state-1",
-) -> str:
+):
     query = {
         "response_type": "code",
         "client_id": client_id,
@@ -103,9 +103,35 @@ def _authorize_and_allow(
     assert "text/html" in page.headers.get("content-type", "")
     assert "GB_MCP_BEARER_TOKEN" not in page.text
     assert 'type="password"' not in page.text.lower()
+    assert re.search(r'name=["\']email["\']', page.text)
+    return page
+
+
+def _authorize_and_allow(
+    client: TestClient,
+    *,
+    client_id: str,
+    redirect_uri: str,
+    challenge: str,
+    resource: str = PUBLIC_RESOURCE,
+    state: str = "state-1",
+    email: str = "player@example.com",
+) -> str:
+    page = _get_authorize_page(
+        client,
+        client_id=client_id,
+        redirect_uri=redirect_uri,
+        challenge=challenge,
+        resource=resource,
+        state=state,
+    )
     allowed = client.post(
         "/authorize",
-        data={"consent_token": _consent_token(page.text), "consent": "allow"},
+        data={
+            "consent_token": _consent_token(page.text),
+            "consent": "allow",
+            "email": email,
+        },
         follow_redirects=False,
     )
     assert allowed.status_code == 302
@@ -117,6 +143,27 @@ def _authorize_and_allow(
     assert parsed.netloc == urlparse(redirect_uri).netloc
     assert parsed.path == urlparse(redirect_uri).path
     return returned["code"][0]
+
+
+def _access_token_claims(token: str) -> dict[str, Any]:
+    return jwt.decode(
+        token,
+        JWT_SECRET,
+        algorithms=["HS256"],
+        audience=PUBLIC_RESOURCE,
+    )
+
+
+def _assert_no_authorization_code(response) -> None:
+    location = response.headers.get("location", "")
+    if response.status_code == 302:
+        returned = parse_qs(urlparse(location).query)
+        assert "code" not in returned
+        return
+    assert response.status_code in {200, 400}
+    if response.status_code == 200:
+        assert "text/html" in response.headers.get("content-type", "")
+    assert "code=" not in location
 
 
 def _token(
@@ -206,15 +253,11 @@ def test_pkce_authorize_token_initialize_and_tools_list(oauth_client: TestClient
         redirect_uri=redirect_uri,
         verifier=verifier,
     )
-    claims = jwt.decode(
-        tokens["access_token"],
-        JWT_SECRET,
-        algorithms=["HS256"],
-        audience=PUBLIC_RESOURCE,
-    )
+    claims = _access_token_claims(tokens["access_token"])
     assert claims["iss"] == PUBLIC_ORIGIN
     assert claims["aud"] == PUBLIC_RESOURCE
-    assert claims["sub"]
+    assert claims["email"] == "player@example.com"
+    assert claims["sub"] == "player@example.com"
     assert "mcp" in claims["scope"].split()
 
     session_id = _initialize(oauth_client, token=tokens["access_token"])
@@ -583,7 +626,19 @@ def test_explicit_email_overrides_oauth_token_claims(
         arguments={},
     )
     assert listed_token.get("games") == []
+    assert "model_request" not in listed_token
     assert "email" not in listed_token
+    listed_owner = _call_tool(
+        oauth_client,
+        token=token,
+        session_id=session_id,
+        name="list_games",
+        arguments={"email": "owner@example.com"},
+    )
+    assert listed_owner["games"][0]["id"] == owner_name
+    assert listed_owner["games"][0]["title"] == "TETRIS"
+    assert "model_request" not in listed_owner
+    assert "email" not in listed_owner
 
 
 def test_static_bearer_omitted_email_returns_model_request(
@@ -601,9 +656,16 @@ def test_static_bearer_omitted_email_returns_model_request(
     assert "email" in payload["model_request"]["instruction"].lower()
 
 
-def test_pkce_token_without_email_claim_asks_for_email(
-    oauth_client: TestClient, isolated_db
+def test_consent_allow_with_email_issues_binding_token(
+    oauth_client: TestClient, isolated_db, roms_dir: Path
 ) -> None:
+    name = "f" * db.SUBDIRECTORY_NAME_LENGTH
+    dest = roms_dir / name
+    dest.mkdir()
+    (dest / "tetris.gb").write_bytes(make_rom(title=b"TETRIS"))
+    with db.session_scope() as session:
+        db.map_subdirectory_to_email(session, name, "player@example.com")
+
     redirect_uri = "http://127.0.0.1:9999/callback"
     registered = _register(oauth_client, redirect_uri)
     verifier, challenge = _pkce()
@@ -612,6 +674,7 @@ def test_pkce_token_without_email_claim_asks_for_email(
         client_id=registered["client_id"],
         redirect_uri=redirect_uri,
         challenge=challenge,
+        email="  Player@Example.com  ",
     )
     tokens = _token(
         oauth_client,
@@ -620,14 +683,9 @@ def test_pkce_token_without_email_claim_asks_for_email(
         redirect_uri=redirect_uri,
         verifier=verifier,
     )
-    claims = jwt.decode(
-        tokens["access_token"],
-        JWT_SECRET,
-        algorithms=["HS256"],
-        audience=PUBLIC_RESOURCE,
-    )
-    assert claims["sub"]
-    assert "email" not in claims
+    claims = _access_token_claims(tokens["access_token"])
+    assert claims["email"] == "player@example.com"
+    assert claims["sub"] == "player@example.com"
     session_id = _initialize(oauth_client, token=tokens["access_token"])
     payload = _call_tool(
         oauth_client,
@@ -636,7 +694,88 @@ def test_pkce_token_without_email_claim_asks_for_email(
         name="list_games",
         arguments={},
     )
-    assert payload["model_request"]["name"] == "email"
+    assert "model_request" not in payload
+    assert payload["ok"] is True
+    assert payload["games"][0]["id"] == name
+    assert "email" not in payload
+
+
+@pytest.mark.parametrize("email", [None, "", "not-an-email"])
+def test_consent_allow_without_valid_email_does_not_issue_code(
+    oauth_client: TestClient, email: str | None
+) -> None:
+    redirect_uri = "http://127.0.0.1:9999/callback"
+    registered = _register(oauth_client, redirect_uri)
+    _verifier, challenge = _pkce()
+    page = _get_authorize_page(
+        oauth_client,
+        client_id=registered["client_id"],
+        redirect_uri=redirect_uri,
+        challenge=challenge,
+    )
+    data = {"consent_token": _consent_token(page.text), "consent": "allow"}
+    if email is not None:
+        data["email"] = email
+    allowed = oauth_client.post("/authorize", data=data, follow_redirects=False)
+    _assert_no_authorization_code(allowed)
+
+
+def test_refresh_preserves_consent_email_and_sub(oauth_client: TestClient) -> None:
+    redirect_uri = "http://127.0.0.1:9999/callback"
+    registered = _register(oauth_client, redirect_uri)
+    verifier, challenge = _pkce()
+    code = _authorize_and_allow(
+        oauth_client,
+        client_id=registered["client_id"],
+        redirect_uri=redirect_uri,
+        challenge=challenge,
+        email="Player@Example.com",
+    )
+    tokens = _token(
+        oauth_client,
+        client_id=registered["client_id"],
+        code=code,
+        redirect_uri=redirect_uri,
+        verifier=verifier,
+    )
+    claims = _access_token_claims(tokens["access_token"])
+    assert claims["email"] == "player@example.com"
+    assert claims["sub"] == "player@example.com"
+    refreshed = oauth_client.post(
+        "/token",
+        data={
+            "grant_type": "refresh_token",
+            "refresh_token": tokens["refresh_token"],
+            "client_id": registered["client_id"],
+            "resource": PUBLIC_RESOURCE,
+        },
+    )
+    assert refreshed.status_code == 200, refreshed.text
+    refreshed_claims = _access_token_claims(refreshed.json()["access_token"])
+    assert refreshed_claims["email"] == "player@example.com"
+    assert refreshed_claims["sub"] == "player@example.com"
+
+
+def test_consent_deny_does_not_require_email(oauth_client: TestClient) -> None:
+    redirect_uri = "http://127.0.0.1:9999/callback"
+    registered = _register(oauth_client, redirect_uri)
+    _verifier, challenge = _pkce()
+    page = _get_authorize_page(
+        oauth_client,
+        client_id=registered["client_id"],
+        redirect_uri=redirect_uri,
+        challenge=challenge,
+    )
+    denied = oauth_client.post(
+        "/authorize",
+        data={"consent_token": _consent_token(page.text), "consent": "deny"},
+        follow_redirects=False,
+    )
+    assert denied.status_code == 302
+    returned = parse_qs(urlparse(denied.headers["location"]).query)
+    assert returned.get("error") == ["access_denied"]
+    assert "code" not in returned
+    assert returned.get("state") == ["state-1"]
 
 
 def test_omitted_email_does_not_bypass_bearer_auth(oauth_client: TestClient) -> None:

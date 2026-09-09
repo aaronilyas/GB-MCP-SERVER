@@ -17,6 +17,14 @@ from gb_mcp.tools import ingest, play as play_tools
 
 mcp = MCPServer("gb-mcp-server", instructions=HOW_TO_PLAY)
 
+_EMAIL_DESCRIPTION = (
+    "Email of the LLM user (application identity, not transport auth). "
+    "Optional when the current OAuth access token has an email or email-shaped "
+    "sub claim. An explicit email wins. If omitted and there is no token "
+    "identity, the result includes model_request asking for email. Ask the user "
+    "if you do not already have it. Do not invent an email."
+)
+
 
 @mcp.tool(
     name="add_rom",
@@ -36,16 +44,25 @@ def add_rom(
         str,
         Field(default="rom.gb", description="Preferred filename if the ROM is accepted."),
     ] = "rom.gb",
+    email: Annotated[
+        str | None,
+        Field(default=None, description=_EMAIL_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
-    return ingest.add_rom(rom_base64, filename=filename)
+    return ingest.add_rom(rom_base64, filename=filename, email=email)
 
 
 @mcp.tool(
     name="list_games",
     description="List this user's games as title, id, and playable.",
 )
-def list_games() -> dict[str, Any]:
-    return play_tools.list_games()
+def list_games(
+    email: Annotated[
+        str | None,
+        Field(default=None, description=_EMAIL_DESCRIPTION),
+    ] = None,
+) -> dict[str, Any]:
+    return play_tools.list_games(email=email)
 
 
 @mcp.tool(
@@ -71,8 +88,12 @@ def boot(
             description="If true, drop the snapshot and cold-boot.",
         ),
     ] = False,
+    email: Annotated[
+        str | None,
+        Field(default=None, description=_EMAIL_DESCRIPTION),
+    ] = None,
 ) -> dict[str, Any]:
-    return play_tools.boot(title=title, id=id, reset=reset)
+    return play_tools.boot(title=title, id=id, reset=reset, email=email)
 
 
 @mcp.tool(

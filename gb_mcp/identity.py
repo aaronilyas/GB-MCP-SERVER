@@ -35,8 +35,13 @@ def model_request() -> dict[str, Any]:
     }
 
 
-def require_email() -> str | dict[str, Any]:
-    """Return the bound email, or ``model_request()`` if none is available."""
+def require_email(explicit: str | None = None) -> str | dict[str, Any]:
+    """Return explicit or token email, or ``model_request()`` if none is available."""
+    if isinstance(explicit, str) and explicit.strip():
+        try:
+            return db.normalize_email(explicit)
+        except ValueError:
+            return model_request()
     email = token_identity_email()
     if email is None:
         return model_request()

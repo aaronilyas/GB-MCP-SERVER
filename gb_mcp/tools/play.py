@@ -165,20 +165,23 @@ def _unplayable_boot_error(reason: str) -> str:
     return f"{text}. Re-submit the complete .gb via add_rom or HTTP POST /roms."
 
 
-def list_games() -> dict[str, Any]:
-    bound = require_email()
+def list_games(email: str | None = None) -> dict[str, Any]:
+    bound = require_email(explicit=email)
     if isinstance(bound, dict):
         return bound
     expire_uploads()
-    return catalog_list_games(bound)
+    result = catalog_list_games(bound)
+    result["ok"] = True
+    return result
 
 
 def boot(
     title: str | None = None,
     id: str | None = None,
     reset: bool = False,
+    email: str | None = None,
 ) -> dict[str, Any]:
-    bound = require_email()
+    bound = require_email(explicit=email)
     if isinstance(bound, dict):
         return bound
     resolved = pyboy_sessions.manager.resolve_game(bound, title=title, id=id)

@@ -24,16 +24,26 @@ and are not published.
 ## Auth
 
 Remote HTTP clients authenticate with a bearer token, an operator JWT
-(`GB_MCP_JWT_SECRET`, HS256), or MCP OAuth 2.1. Email is **application
-identity**, not transport authentication. After that check succeeds, tools
-take an optional `email` argument. If `email` is omitted, an OAuth access
-token `email` or `sub` claim is used as the session identity. If there is no
-token identity, the tool returns a structured `model_request` asking for
-email — do not invent one (for example `trainer@x.ai`). An explicit `email`
-still wins when present.
+(`GB_MCP_JWT_SECRET`, HS256), or MCP OAuth 2.1. That is **transport auth**,
+not application identity. Never ask the model for a bearer token, a
+password, or an API key.
 
-Do not ask the model to type the bearer token, a password, or an API key into
-a tool.
+Application identity is the **consent email claim** on the OAuth access
+token (`email` plus an email-shaped `sub`), or an optional `email` on
+`list_games`, `boot`, and `add_rom` only. Explicit `email` wins over token
+identity.
+
+Grok path: connect → consent **with email** → `list_games` returns
+`{ok: true}` and the mapped games (no `model_request`). Or pass explicit
+`email` on `list_games` / `boot` / `add_rom`. After `boot`, `play` /
+`save` / `stop` are session-bound and take no email argument.
+
+If `email` is omitted and there is no token identity, those tools return a
+structured `model_request` asking for email — do not invent one (for
+example `trainer@x.ai`).
+
+`POST /roms` maps from the token email or an optional JSON/form `email`.
+Large dumps stay on that HTTP route, not chat chunks.
 
 HTTP mode refuses to boot unless `GB_MCP_BEARER_TOKEN` or `GB_MCP_JWT_SECRET`
 is set. There is no query-string token.
@@ -44,16 +54,17 @@ The supported operator/model catalog is six tools:
 
 | Tool | Purpose |
 | --- | --- |
-| `add_rom` | Small homebrew: one `rom_base64` payload; isolated Docker validation; persist on success |
-| `list_games` | Games mapped to this email (`title`, `id`, `playable`) |
-| `boot` | Start or resume a play instance. `reset=true` drops the PyBoy snapshot and cold-boots |
-| `play` | Buttons / macros; returns 4× PNG stills (640×576). Screenshot-only — no memory dumps |
-| `save` | Write the PyBoy snapshot (`rom.gb.state`) without stopping |
-| `stop` | Snapshot, flush cartridge SRAM (`rom.gb.ram`), remove the instance container |
+| `add_rom` | Small homebrew: one `rom_base64` payload; isolated Docker validation; persist on success. Optional `email` |
+| `list_games` | Games mapped to this email (`title`, `id`, `playable`). Optional `email` |
+| `boot` | Start or resume a play instance. `reset=true` drops the PyBoy snapshot and cold-boots. Optional `email` |
+| `play` | Buttons / macros; returns 4× PNG stills (640×576). Screenshot-only — no memory dumps. No email argument |
+| `save` | Write the PyBoy snapshot (`rom.gb.state`) without stopping. No email argument |
+| `stop` | Snapshot, flush cartridge SRAM (`rom.gb.ram`), remove the instance container. No email argument |
 
 **Large dumps use `POST /roms` (HTTP), not chat chunks.** Hosted connectors
 cannot carry a 1 MiB ROM as a tool argument. Small homebrew can use
-`add_rom` / `rom_base64`.
+`add_rom` / `rom_base64`. `POST /roms` maps from the token email or an
+optional JSON/form `email`.
 
 Legacy MCP names (`submit_gb_rom`, `send_pyboy_input`, `ping_pyboy`, the
 chunked-upload tools, …) are gone from the public catalog; see git history.

@@ -445,7 +445,13 @@ def _require_rom_bytes(rom_bytes: bytes) -> bytes:
     return rom_bytes
 
 
-async def _rom_from_json(request: Request) -> tuple[bytes, str]:
+def _optional_body_email(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    return None
+
+
+async def _rom_from_json(request: Request) -> tuple[bytes, str, str | None]:
     try:
         payload = await request.json()
     except Exception as exc:  # noqa: BLE001
@@ -458,15 +464,16 @@ async def _rom_from_json(request: Request) -> tuple[bytes, str]:
     raw = payload.get("rom_base64")
     if not isinstance(raw, str) or not raw:
         raise ValueError("rom_base64 is required")
-    return _decode_rom_base64(raw), filename
+    return _decode_rom_base64(raw), filename, _optional_body_email(payload.get("email"))
 
 
-async def _rom_from_multipart(request: Request) -> tuple[bytes, str]:
+async def _rom_from_multipart(request: Request) -> tuple[bytes, str, str | None]:
     async with request.form(max_part_size=config.MAX_ROM_BYTES) as form:
         filename = None
         named = form.get("filename")
         if isinstance(named, str) and named.strip():
             filename = named
+        email = _optional_body_email(form.get("email"))
         upload: UploadFile | None = None
         for key in ("file", "rom", "rom_file"):
             candidate = form.get(key)
@@ -480,27 +487,27 @@ async def _rom_from_multipart(request: Request) -> tuple[bytes, str]:
                     break
         if upload is not None:
             data = await upload.read()
-            return data, filename or upload.filename or "rom.gb"
+            return data, filename or upload.filename or "rom.gb", email
         raw = form.get("rom_base64")
         if isinstance(raw, str) and raw:
-            return _decode_rom_base64(raw), filename or "rom.gb"
+            return _decode_rom_base64(raw), filename or "rom.gb", email
         raise ValueError("multipart body must include a ROM file or rom_base64")
 
 
-async def _rom_from_raw(request: Request) -> tuple[bytes, str]:
+async def _rom_from_raw(request: Request) -> tuple[bytes, str, str | None]:
     data = await request.body()
-    return data, _filename_from_request(request) or "rom.gb"
+    return data, _filename_from_request(request) or "rom.gb", None
 
 
-async def _read_rom_payload(request: Request) -> tuple[bytes, str]:
+async def _read_rom_payload(request: Request) -> tuple[bytes, str, str | None]:
     media = _media_type(request)
     if media == "application/json":
-        rom_bytes, filename = await _rom_from_json(request)
+        rom_bytes, filename, email = await _rom_from_json(request)
     elif media == "multipart/form-data":
-        rom_bytes, filename = await _rom_from_multipart(request)
+        rom_bytes, filename, email = await _rom_from_multipart(request)
     else:
-        rom_bytes, filename = await _rom_from_raw(request)
-    return _require_rom_bytes(rom_bytes), filename
+        rom_bytes, filename, email = await _rom_from_raw(request)
+    return _require_rom_bytes(rom_bytes), filename, email
 
 
 def _run_isolated_validation(rom_bytes: bytes) -> dict[str, Any]:
@@ -546,8 +553,13 @@ def _reject_unplayable_or_invalid(
 
 
 def _persist_and_map(
-    rom_bytes: bytes, filename: str, validation: dict[str, Any]
+    rom_bytes: bytes,
+    filename: str,
+    validation: dict[str, Any],
+    email: str | None = None,
 ) -> dict[str, Any]:
+    from gb_mcp.identity import require_email
+
     safe_name = _sanitize_filename(filename)
     subdirectory = _allocate_subdirectory_name()
     dest = _persist_validated_rom(subdirectory, safe_name, rom_bytes)
@@ -559,16 +571,12 @@ def _persist_and_map(
         "mapped": False,
         "validation": validation,
     }
-    identity = current_oauth_identity()
-    if identity is None:
-        return result
-    try:
-        email = db.normalize_email(identity)
-    except ValueError:
+    bound = require_email(explicit=email)
+    if isinstance(bound, dict):
         return result
     try:
         with db.session_scope() as session:
-            mapped = db.map_subdirectory_to_email(session, subdirectory, email)
+            mapped = db.map_subdirectory_to_email(session, subdirectory, bound)
             result["email"] = mapped.user.email
         result["mapped"] = True
     except Exception as exc:  # noqa: BLE001
@@ -579,7 +587,7 @@ def _persist_and_map(
 async def post_roms(request: Request) -> Response:
     """Validate a ROM in isolation and persist under ``roms/<32-hex>/``."""
     try:
-        rom_bytes, filename = await _read_rom_payload(request)
+        rom_bytes, filename, email = await _read_rom_payload(request)
     except ValueError as exc:
         return JSONResponse(
             {
@@ -611,7 +619,7 @@ async def post_roms(request: Request) -> Response:
         return JSONResponse(rejected, status_code=400)
 
     try:
-        return JSONResponse(_persist_and_map(rom_bytes, filename, validation))
+        return JSONResponse(_persist_and_map(rom_bytes, filename, validation, email))
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(
             {
