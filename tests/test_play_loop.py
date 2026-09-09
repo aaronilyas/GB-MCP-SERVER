@@ -11,7 +11,7 @@ import pytest
 from PIL import Image as PILImage
 
 import db
-from gb_mcp.emulator.input_schema import parse_play_input
+from gb_mcp.emulator.input_schema import parse_play_args, parse_play_input, play_input_from_args
 from gb_mcp.emulator.play_limits import (
     FORBIDDEN_RESPONSE_KEY_NEEDLES,
     MAX_SCREENSHOT_ALL,
@@ -539,3 +539,133 @@ def fake_docker_submit(monkeypatch: pytest.MonkeyPatch):
         lambda _cid, _data: {"valid": True, "reason": "ok"},
     )
     return monkeypatch
+
+
+def test_public_long_up_hold_aborts_on_battle_takeover() -> None:
+    from gb_mcp.emulator.loop import shape_public_status
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    overworld = _overworld_field()
+    battle = _battle()
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        if ticks < 20:
+            return PILImage.fromarray(overworld)
+        return PILImage.fromarray(battle)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 240}))
+    assert play.macro == "hold"
+    assert play.apply_default_hold_abort is True
+    result = execute_play_command(pyboy, play)
+    assert result["frames_advanced"] < 240
+    assert result.get("stop_detail") == "battle" or result.get("stop_reason") in {
+        "default_hold_abort",
+        "classifier",
+    }
+    public = shape_public_status(result)
+    assert public["stopped_reason"] == "battle"
+    assert public["looks_like"] == "battle"
+    natives = result.get("pngs_native") or []
+    assert len(natives) >= 1
+
+
+def test_public_mash_until_textbox_disappears() -> None:
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    box = _dialogue_bar()
+    field = _overworld_field()
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        if ticks < 24:
+            return PILImage.fromarray(box)
+        return PILImage.fromarray(field)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(
+        parse_play_args(
+            {
+                "mash": True,
+                "frames": 80,
+                "until": "textbox",
+                "until_polarity": "disappears",
+            }
+        )
+    )
+    assert play.until is not None
+    assert play.until.classifier_polarity == "disappears"
+    result = execute_play_command(pyboy, play)
+    assert result["until_fired"] is True
+    assert result["frames_advanced"] < 80
+    assert result["frames_advanced"] >= 24
+
+
+def test_public_blocked_hold_stops_on_static_wall() -> None:
+    from dataclasses import replace
+
+    from gb_mcp.emulator.loop import shape_public_status
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    wall = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+    wall[:, :] = (72, 148, 72)
+    wall[72:88, 72:88] = (200, 80, 80)
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    pyboy.frame_factory = lambda _ticks, _pressed: PILImage.fromarray(wall)
+    play = play_input_from_args(
+        parse_play_args({"buttons": ["up"], "frames": 200, "until": "blocked"})
+    )
+    assert play.until is not None
+    play = replace(
+        play,
+        until_eval_interval=1,
+        until=replace(play.until, stable_frames=3),
+    )
+    result = execute_play_command(pyboy, play)
+    assert result["frames_advanced"] < 200
+    public = shape_public_status(result)
+    assert public["stopped_reason"] == "blocked"
+    assert public["player_moved"] is False
+
+
+def test_public_long_hold_returns_keyframes() -> None:
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    play = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 40}))
+    assert play.macro == "hold"
+    assert play.screenshot_mode == "keyframes"
+    # Unique-per-tick frames would not stay blocked; disable abort for this count test.
+    from dataclasses import replace
+
+    play = replace(play, disable_default_hold_abort=True, apply_default_hold_abort=False)
+    result = execute_play_command(pyboy, play)
+    natives = result.get("pngs_native") or []
+    assert len(natives) > 1
+    assert result.get("gif") is None
+    assert result.get("screenshot_mode") == "keyframes"
+
+
+def test_intent_advance_text_noop_without_box() -> None:
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    field = _overworld_field()
+    pyboy.frame_factory = lambda _ticks, _pressed: PILImage.fromarray(field)
+    play = play_input_from_args(parse_play_args({"intent": "advance_text"}))
+    result = execute_play_command(pyboy, play)
+    assert result["frames_advanced"] <= 16
+
+
+def test_intent_run_away_returns_immediately_outside_battle() -> None:
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    field = _overworld_field()
+    pyboy.frame_factory = lambda _ticks, _pressed: PILImage.fromarray(field)
+    play = play_input_from_args(parse_play_args({"intent": "run_away"}))
+    result = execute_play_command(pyboy, play)
+    assert result["frames_advanced"] <= 16
+    classifiers = result.get("classifiers") or {}
+    assert classifiers.get("battle_likely") is not True

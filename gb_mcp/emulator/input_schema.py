@@ -40,6 +40,10 @@ from gb_mcp.emulator.play_limits import (
     MIN_UNTIL_EVAL_INTERVAL,
     NATIVE_HEIGHT,
     NATIVE_WIDTH,
+    PUBLIC_INTENTS,
+    PUBLIC_KEYFRAME_MIN_FRAMES,
+    PUBLIC_MASH_PRESS_FRAMES,
+    PUBLIC_MASH_RELEASE_FRAMES,
     SCREENSHOT_MODES,
     SCREENSHOT_SCALES,
     UNTIL_ONS,
@@ -98,6 +102,7 @@ class PlayInput:
     ocr: bool
     call_timeout_seconds: float
     planned_frames: int
+    intent: str | None = None
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -243,13 +248,15 @@ def parse_until(value: Any) -> UntilSpec | None:
     if not isinstance(on_raw, str):
         raise ValueError(
             "until.on must be one of: pixel_delta_above, pixel_delta_below, "
-            "stable, region_hash_eq, region_hash_neq, classifier, none"
+            "stable, region_hash_eq, region_hash_neq, classifier, luma_jump, "
+            "blocked, overworld, none"
         )
     on = on_raw.strip().lower()
     if on not in UNTIL_ONS:
         raise ValueError(
             "until.on must be one of: pixel_delta_above, pixel_delta_below, "
-            "stable, region_hash_eq, region_hash_neq, classifier, none"
+            "stable, region_hash_eq, region_hash_neq, classifier, luma_jump, "
+            "blocked, overworld, none"
         )
     if on == "none":
         return UntilSpec(region=DEFAULT_REGION, on="none")
@@ -307,6 +314,19 @@ def parse_until(value: Any) -> UntilSpec | None:
         classifier=classifier,
         classifier_polarity=polarity,
     )
+
+
+def _parse_intent(value: Any) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("intent must be 'advance_text', 'run_away', or 'battle_turn'")
+    intent = value.strip().lower()
+    if not intent:
+        return None
+    if intent not in PUBLIC_INTENTS:
+        raise ValueError("intent must be 'advance_text', 'run_away', or 'battle_turn'")
+    return intent
 
 
 def parse_hash_regions(value: Any) -> dict[str, tuple[int, int, int, int]]:
@@ -413,6 +433,7 @@ def parse_play_input(payload: dict[str, Any], *, session_speed: int | None = Non
 
     ocr = bool(payload.get("ocr"))
     hash_regions = parse_hash_regions(payload.get("hash_regions"))
+    intent = _parse_intent(payload.get("intent"))
 
     raw_macro = payload.get("macro")
     macro: str | None
@@ -561,6 +582,7 @@ def parse_play_input(payload: dict[str, Any], *, session_speed: int | None = Non
         ocr=ocr,
         call_timeout_seconds=timeout,
         planned_frames=min(planned, max_frames),
+        intent=intent,
     )
 
 
@@ -573,8 +595,16 @@ HASH_CENTER = CENTER_REGION
 # internal hold_frames default of 1. Mash without `frames` still uses the
 # existing max_frames cap. `until` is a public name, not UntilSpec.
 DEFAULT_PLAY_FRAMES = 16
-PUBLIC_UNTIL = frozenset({"battle", "textbox", "menu", "stable", "fade"})
+PUBLIC_UNTIL = frozenset({"battle", "textbox", "menu", "stable", "fade", "blocked"})
+PUBLIC_UNTIL_ALIASES: dict[str, tuple[str, str | None]] = {
+    "textbox_end": ("textbox", "disappears"),
+    "clear_text": ("textbox", "disappears"),
+    "overworld": ("overworld", None),
+}
 PUBLIC_MEDIA = frozenset({"image", "video"})
+PUBLIC_UNTIL_POLARITIES = CLASSIFIER_POLARITIES
+_DIRECTION_BUTTONS = frozenset({"up", "down", "left", "right"})
+_AB_BUTTONS = frozenset({"a", "b"})
 _PUBLIC_UNTIL_TO_INTERNAL: dict[str, dict[str, Any]] = {
     "battle": {
         "on": "classifier",
@@ -592,7 +622,9 @@ _PUBLIC_UNTIL_TO_INTERNAL: dict[str, dict[str, Any]] = {
         "classifier_polarity": "appears",
     },
     "stable": {"on": "stable"},
-    "fade": {"on": "pixel_delta_above", "region": list(DEFAULT_REGION)},
+    "fade": {"on": "luma_jump"},
+    "blocked": {"on": "blocked"},
+    "overworld": {"on": "overworld"},
 }
 
 
@@ -606,6 +638,8 @@ class PlayArgs:
     mash: bool = False
     steps: tuple[InputStep, ...] = ()
     until: str | None = None
+    until_polarity: str = "appears"
+    intent: str | None = None
     media: str = "image"
 
 
@@ -626,15 +660,53 @@ def _normalize_bounded_int(
     return value
 
 
-def _parse_public_until(value: Any) -> str | None:
+def _parse_public_until(value: Any) -> tuple[str | None, str | None]:
+    """Return (canonical until, polarity override from alias)."""
+    if value is None:
+        return None, None
+    if not isinstance(value, str):
+        raise ValueError(
+            "until must be 'battle', 'textbox', 'menu', 'stable', 'fade', or 'blocked'"
+        )
+    until = value.strip().lower()
+    if until in PUBLIC_UNTIL_ALIASES:
+        return PUBLIC_UNTIL_ALIASES[until]
+    if until not in PUBLIC_UNTIL and until != "overworld":
+        raise ValueError(
+            "until must be 'battle', 'textbox', 'menu', 'stable', 'fade', or 'blocked'"
+        )
+    return until, None
+
+
+def _parse_public_polarity(value: Any) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("until must be 'battle', 'textbox', 'menu', 'stable', or 'fade'")
-    until = value.strip().lower()
-    if until not in PUBLIC_UNTIL:
-        raise ValueError("until must be 'battle', 'textbox', 'menu', 'stable', or 'fade'")
-    return until
+        raise ValueError("until_polarity must be 'appears' or 'disappears'")
+    polarity = value.strip().lower()
+    if polarity not in PUBLIC_UNTIL_POLARITIES:
+        raise ValueError("until_polarity must be 'appears' or 'disappears'")
+    return polarity
+
+
+def _public_hold_buttons(buttons: tuple[str, ...], frames: int) -> bool:
+    """Long single-direction or A/B-only chords become macro=hold with abort."""
+    if frames <= DEFAULT_PLAY_FRAMES or not buttons:
+        return False
+    names = set(buttons)
+    if names <= _DIRECTION_BUTTONS and len(names) == 1:
+        return True
+    if names <= _AB_BUTTONS:
+        return True
+    return False
+
+
+def _public_screenshot_mode(*, media: str, macro: str, planned: int) -> str:
+    if media == "video":
+        return DEFAULT_SCREENSHOT_MODE
+    if planned > PUBLIC_KEYFRAME_MIN_FRAMES or macro in {"hold", "mash"}:
+        return "keyframes"
+    return DEFAULT_SCREENSHOT_MODE
 
 
 def _parse_public_media(value: Any) -> str:
@@ -694,7 +766,10 @@ def parse_play_args(payload: dict[str, Any]) -> PlayArgs:
     else:
         raise ValueError("mash must be a boolean")
 
-    until = _parse_public_until(payload.get("until"))
+    until, alias_polarity = _parse_public_until(payload.get("until"))
+    explicit_polarity = _parse_public_polarity(payload.get("until_polarity"))
+    until_polarity = explicit_polarity or alias_polarity or "appears"
+    intent = _parse_intent(payload.get("intent"))
     media = _parse_public_media(payload.get("media"))
     gap = _normalize_bounded_int(
         payload.get("gap"),
@@ -712,7 +787,7 @@ def parse_play_args(payload: dict[str, Any]) -> PlayArgs:
         raise ValueError("provide either top-level buttons or steps, not both")
     if mash and has_steps:
         raise ValueError("provide either mash or steps, not both")
-    if not mash and not has_buttons and not has_steps:
+    if not mash and not has_buttons and not has_steps and not intent:
         raise ValueError("at least one button is required")
 
     frames_default = MAX_FRAMES_PER_CALL if mash else DEFAULT_PLAY_FRAMES
@@ -751,10 +826,26 @@ def parse_play_args(payload: dict[str, Any]) -> PlayArgs:
         mash=mash,
         steps=steps,
         until=until,
+        until_polarity=until_polarity,
+        intent=intent,
         media=media,
     )
     play_input_from_args(args)
     return args
+
+
+def _public_until_spec(args: PlayArgs) -> dict[str, Any] | None:
+    if args.until is None:
+        return None
+    spec = _PUBLIC_UNTIL_TO_INTERNAL.get(args.until)
+    if spec is None:
+        raise ValueError(
+            "until must be 'battle', 'textbox', 'menu', 'stable', 'fade', or 'blocked'"
+        )
+    mapped = dict(spec)
+    if mapped.get("on") == "classifier":
+        mapped["classifier_polarity"] = args.until_polarity or "appears"
+    return mapped
 
 
 def play_input_from_args(args: PlayArgs) -> PlayInput:
@@ -765,16 +856,18 @@ def play_input_from_args(args: PlayArgs) -> PlayInput:
         "screenshot_scale": DEFAULT_SCREENSHOT_SCALE,
         "screenshot_mode": DEFAULT_SCREENSHOT_MODE,
     }
-    if args.until is not None:
-        spec = _PUBLIC_UNTIL_TO_INTERNAL.get(args.until)
-        if spec is None:
-            raise ValueError(
-                "until must be 'battle', 'textbox', 'menu', 'stable', or 'fade'"
-            )
-        payload["until"] = dict(spec)
+    until_spec = _public_until_spec(args)
+    if until_spec is not None:
+        payload["until"] = until_spec
+    if args.intent:
+        payload["intent"] = args.intent
     if args.mash:
         payload["macro"] = "mash"
         payload["max_frames"] = args.frames
+        payload["mash_press_frames"] = PUBLIC_MASH_PRESS_FRAMES
+        payload["mash_release_frames"] = PUBLIC_MASH_RELEASE_FRAMES
+        resolved_macro = "mash"
+        planned = args.frames
     elif args.steps:
         payload["steps"] = [
             {
@@ -785,11 +878,30 @@ def play_input_from_args(args: PlayArgs) -> PlayInput:
             }
             for step in args.steps
         ]
+        resolved_macro = "steps"
+        planned = sum(step.hold_frames + step.gap_frames for step in args.steps)
     elif not args.buttons:
         payload["wait"] = True
         payload["hold_frames"] = args.frames
+        resolved_macro = "steps"
+        planned = args.frames
+    elif _public_hold_buttons(args.buttons, args.frames):
+        payload["macro"] = "hold"
+        payload["buttons"] = list(args.buttons)
+        payload["max_frames"] = args.frames
+        payload["hold_frames"] = args.frames
+        resolved_macro = "hold"
+        planned = args.frames
     else:
         payload["buttons"] = list(args.buttons)
         payload["hold_frames"] = args.frames
+        resolved_macro = "buttons"
+        planned = args.frames
+    payload["screenshot_mode"] = _public_screenshot_mode(
+        media=args.media, macro=resolved_macro, planned=planned
+    )
     play = parse_play_input(payload)
-    return replace(play, extra={"media": args.media})
+    extra = {"media": args.media}
+    if args.intent:
+        extra["intent"] = args.intent
+    return replace(play, extra=extra)

@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased] — 2026-09-09
+
+### Faster screenshot-only play
+
+- Public `play(buttons=["up"], frames=240)` is a directional **hold** with default abort (battle, text, menu, fade, blocked wall). A 16-frame tap stays a one-tile chord. Long A/B holds skip dialogue the same way.
+- `until_polarity=appears|disappears` (default appears). Aliases: `textbox_end` / `clear_text` (textbox disappears), `overworld` (battle gone then stable). Public `until=fade` is a luma jump vs start-of-call, not full-screen camera scroll. New `until=blocked` is an LCD player-sprite crop that stays still while the rest of the screen is still.
+- `looks_like` prefers textbox over battle. `battle_likely` now needs both HP-bar slots **and** a fight HUD cue, and rejects Pallet/fence/grass overworld. Public JSON may include `stopped_reason`, `player_moved`, `textbox_complete`, and `ocr_text` (inner textbox crop only).
+- Planned frames > 24, or public hold/mash, return PNG **keyframes** unless `media=video` (GIF as before). Gap cap is 180 frames. Public mash timing is 12 press / 8 release.
+- Optional `intent`: `advance_text`, `run_away`, `battle_turn` — composed from existing engine primitives, not new MCP tools.
+- `HOW_TO_PLAY` teaches long holds, text mash, flee/turn intents, and reading keyframes.
+
 ## [Unreleased] — 2026-09-08
 
 ### Consent email and optional tool email identity

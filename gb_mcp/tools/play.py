@@ -277,9 +277,16 @@ def play(
     mash: bool | None = None,
     steps: list[dict[str, Any]] | None = None,
     until: str | None = None,
+    until_polarity: str | None = None,
+    intent: str | None = None,
     media: str | None = None,
     screenshot_mode: str | None = None,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
+    """Press buttons on the current session and look at the returned LCD.
+
+    Long directional ``frames`` become a hold that aborts on battle, text,
+    menu, fade, or a blocked wall. Dialogue uses mash or ``intent=advance_text``.
+    """
     bound = require_email()
     if isinstance(bound, dict):
         return bound
@@ -300,6 +307,10 @@ def play(
         raw["steps"] = steps
     if until is not None:
         raw["until"] = until
+    if until_polarity is not None:
+        raw["until_polarity"] = until_polarity
+    if intent is not None:
+        raw["intent"] = intent
     if media is not None:
         raw["media"] = media
     try:

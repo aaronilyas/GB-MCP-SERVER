@@ -52,6 +52,7 @@ def run_play_input(
     frames_advanced = 0
     eval_index = 0
     stop_reason: str | None = None
+    stop_detail: str | None = None
     until_fired = False
     final_recorded = False
     last_lcd_rendered = False
@@ -124,6 +125,7 @@ def run_play_input(
                             )
                         final_recorded = True
                         stop_reason = getattr(decision, "reason", "completed")
+                        stop_detail = getattr(decision, "detail", None)
                         until_fired = bool(getattr(decision, "until_fired", True))
                         break
                 if screenshot_plan is not None and (want or is_last or step_shot):
@@ -174,6 +176,7 @@ def run_play_input(
     engine = {
         "frames_advanced": frames_advanced,
         "stop_reason": stop_reason,
+        "stop_detail": stop_detail,
         "until_fired": until_fired,
         "emulation_speed": play.emulation_speed,
         "macro": play.macro,

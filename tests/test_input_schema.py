@@ -16,13 +16,15 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_HOLD_ABORT_THRESHOLD,
     DEFAULT_MASH_BUTTON,
     DEFAULT_MASH_PRESS_FRAMES,
-    DEFAULT_MASH_RELEASE_FRAMES,
     DEFAULT_REGION,
     DEFAULT_SCREENSHOT_MODE,
     DEFAULT_SCREENSHOT_SCALE,
     DEFAULT_UNTIL_EVAL_INTERVAL,
+    MAX_GAP_FRAMES,
     MAX_HOLD_FRAMES,
     MAX_INPUT_STEPS,
+    PUBLIC_MASH_PRESS_FRAMES,
+    PUBLIC_MASH_RELEASE_FRAMES,
 )
 
 
@@ -155,8 +157,10 @@ def test_parse_play_args_mash_true() -> None:
     play = play_input_from_args(args)
     assert play.macro == "mash"
     assert play.mash_button == DEFAULT_MASH_BUTTON
-    assert play.mash_press_frames == DEFAULT_MASH_PRESS_FRAMES
-    assert play.mash_release_frames == DEFAULT_MASH_RELEASE_FRAMES
+    assert play.mash_press_frames == PUBLIC_MASH_PRESS_FRAMES
+    assert play.mash_release_frames == PUBLIC_MASH_RELEASE_FRAMES
+    assert play.mash_press_frames != DEFAULT_MASH_PRESS_FRAMES
+    assert play.screenshot_mode == "keyframes"
 
 
 @pytest.mark.parametrize(
@@ -166,7 +170,8 @@ def test_parse_play_args_mash_true() -> None:
         ("textbox", "classifier", "textbox_likely"),
         ("menu", "classifier", "start_menu_likely"),
         ("stable", "stable", None),
-        ("fade", "pixel_delta_above", None),
+        ("fade", "luma_jump", None),
+        ("blocked", "blocked", None),
     ],
 )
 def test_parse_play_args_until_mapping(
@@ -221,3 +226,88 @@ def test_parse_play_args_ignores_internal_payload_keys() -> None:
     assert play.hold_frames == 16
     assert play.mash_press_frames == DEFAULT_MASH_PRESS_FRAMES
     assert play.until is None
+
+
+def test_public_gap_cap_is_180() -> None:
+    assert MAX_GAP_FRAMES == 180
+    args = parse_play_args({"buttons": ["a"], "gap": 180})
+    assert args.gap == 180
+    with pytest.raises(ValueError, match="gap"):
+        parse_play_args({"buttons": ["a"], "gap": 181})
+
+
+def test_public_long_direction_is_hold_with_abort() -> None:
+    tap = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 16}))
+    assert tap.macro == "buttons"
+    assert tap.apply_default_hold_abort is False
+    assert tap.screenshot_mode == DEFAULT_SCREENSHOT_MODE
+
+    hold = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 240}))
+    assert hold.macro == "hold"
+    assert hold.buttons == ("up",)
+    assert hold.max_frames == 240
+    assert hold.apply_default_hold_abort is True
+    assert hold.screenshot_mode == "keyframes"
+
+    chord = play_input_from_args(parse_play_args({"buttons": ["a", "up"], "frames": 240}))
+    assert chord.macro == "buttons"
+    assert chord.apply_default_hold_abort is False
+
+    ab = play_input_from_args(parse_play_args({"buttons": ["a"], "frames": 80}))
+    assert ab.macro == "hold"
+    assert ab.apply_default_hold_abort is True
+
+    short_ab = play_input_from_args(parse_play_args({"buttons": ["a", "b"], "frames": 8}))
+    assert short_ab.macro == "buttons"
+    assert short_ab.apply_default_hold_abort is False
+
+
+def test_public_until_polarity_and_aliases() -> None:
+    appears = parse_play_args({"buttons": ["a"], "until": "textbox"})
+    assert appears.until_polarity == "appears"
+    play = play_input_from_args(appears)
+    assert play.until is not None
+    assert play.until.classifier == "textbox_likely"
+    assert play.until.classifier_polarity == "appears"
+
+    gone = parse_play_args(
+        {"mash": True, "until": "textbox", "until_polarity": "disappears"}
+    )
+    play = play_input_from_args(gone)
+    assert play.until is not None
+    assert play.until.classifier_polarity == "disappears"
+    assert play.mash_press_frames == PUBLIC_MASH_PRESS_FRAMES
+
+    alias = parse_play_args({"buttons": ["a"], "until": "textbox_end"})
+    assert alias.until == "textbox"
+    assert alias.until_polarity == "disappears"
+    play = play_input_from_args(alias)
+    assert play.until is not None
+    assert play.until.classifier_polarity == "disappears"
+
+    overworld = parse_play_args({"buttons": ["a"], "until": "overworld"})
+    play = play_input_from_args(overworld)
+    assert play.until is not None
+    assert play.until.on == "overworld"
+
+
+def test_public_intent_parse() -> None:
+    args = parse_play_args({"intent": "advance_text"})
+    assert args.intent == "advance_text"
+    play = play_input_from_args(args)
+    assert play.intent == "advance_text"
+    run = parse_play_args({"intent": "run_away"})
+    assert run.intent == "run_away"
+    turn = parse_play_args({"intent": "battle_turn", "buttons": ["a"]})
+    assert turn.intent == "battle_turn"
+    with pytest.raises(ValueError, match="intent"):
+        parse_play_args({"intent": "pathfind"})
+
+
+def test_public_video_keeps_final_for_gif_path() -> None:
+    play = play_input_from_args(
+        parse_play_args({"buttons": ["up"], "frames": 240, "media": "video"})
+    )
+    assert play.macro == "hold"
+    assert play.extra["media"] == "video"
+    assert play.screenshot_mode == "final"

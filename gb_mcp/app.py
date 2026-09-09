@@ -153,9 +153,12 @@ def boot(
 @mcp.tool(
     name="play",
     description=(
-        "Press Game Boy buttons on the current session and look at the returned "
-        "PNG or short GIF. After boot, do not pass email or id. buttons=[] waits. "
-        "Optional frames, gap, mash, steps, until (battle|textbox|menu|stable|fade), "
+        "Press Game Boy buttons and look at the returned PNG keyframes or short "
+        "GIF. After boot, do not pass email or id. Walk with a long directional "
+        "hold (frames in the hundreds); it aborts on battle, text, menu, fade, or "
+        "blocked. buttons=[] waits. Optional frames, gap, mash, steps, until "
+        "(battle|textbox|menu|stable|fade|blocked), until_polarity "
+        "(appears|disappears), intent (advance_text|run_away|battle_turn), "
         "and media (image|video)."
     ),
 )
@@ -166,13 +169,19 @@ def play(
             default=None,
             description=(
                 "Buttons pressed together: a, b, start, select, up, down, left, "
-                "right. Empty list waits. Omit when passing steps or mash."
+                "right. Empty list waits. Omit when passing steps, mash, or intent."
             ),
         ),
     ] = None,
     frames: Annotated[
         int | None,
-        Field(default=None, description="Hold or wait frames. Default 16."),
+        Field(
+            default=None,
+            description=(
+                "Hold or wait frames. Default 16 (one tile). Use hundreds for a "
+                "walk; the hold aborts on battle, text, menu, fade, or blocked."
+            ),
+        ),
     ] = None,
     gap: Annotated[
         int | None,
@@ -180,7 +189,10 @@ def play(
     ] = None,
     mash: Annotated[
         bool | None,
-        Field(default=None, description="If true, mash A for frames ticks."),
+        Field(
+            default=None,
+            description="If true, mash A until frames or until. Use for dialogue.",
+        ),
     ] = None,
     steps: Annotated[
         list[dict[str, Any]] | None,
@@ -193,12 +205,29 @@ def play(
         str | None,
         Field(
             default=None,
-            description="Stop early on battle, textbox, menu, stable, or fade.",
+            description=(
+                "Stop early on battle, textbox, menu, stable, fade, or blocked. "
+                "Aliases: textbox_end, clear_text, overworld."
+            ),
+        ),
+    ] = None,
+    until_polarity: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="appears (default) or disappears. Use disappears to mash a textbox until it is gone.",
+        ),
+    ] = None,
+    intent: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description="advance_text, run_away, or battle_turn. Composed from buttons and until.",
         ),
     ] = None,
     media: Annotated[
         str | None,
-        Field(default=None, description="image (default PNG) or video (GIF when available)."),
+        Field(default=None, description="image (default PNG keyframes) or video (GIF when available)."),
     ] = None,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
     return play_tools.play(
@@ -208,6 +237,8 @@ def play(
         mash=mash,
         steps=steps,
         until=until,
+        until_polarity=until_polarity,
+        intent=intent,
         media=media,
     )
 

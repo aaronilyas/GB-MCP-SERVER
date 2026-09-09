@@ -20,7 +20,6 @@ PUBLIC_STRIPPED_KEYS = (
     "native_size",
     "email",
     "subdirectory",
-    "ocr_text",
     "ocr_engine",
     "ocr_error",
     "classifiers",
@@ -171,7 +170,9 @@ def test_shape_public_status_drops_internal_fields() -> None:
     assert public["stopped"] is False
     assert public["game"] == "POKEMON RED"
     assert "/" not in (public["game"] or "")
-    assert public["looks_like"] == "battle"
+    assert public["looks_like"] == "textbox"
+    assert public["stopped_reason"] == "completed"
+    assert public["ocr_text"] == "HELLO"
     classifier_fields = [
         path
         for path in _flatten_keys(public)
@@ -181,10 +182,13 @@ def test_shape_public_status_drops_internal_fields() -> None:
     assert "looks_like" in public
     for path in _flatten_keys(public):
         joined = path.lower()
+        leaf = path.split(".")[-1].lower()
         for needle in FORBIDDEN_RESPONSE_KEY_NEEDLES:
             assert needle not in joined, (path, needle)
-        for leak in ("hash", "blake2s", "rom_path", "ocr_", "email", "png"):
+        for leak in ("hash", "blake2s", "rom_path", "email", "png"):
             assert leak not in joined, (path, leak)
+        if leaf != "ocr_text":
+            assert "ocr_" not in joined, (path, "ocr_")
 
 
 def test_shape_public_status_allowlist_and_error() -> None:
@@ -216,6 +220,10 @@ def test_shape_public_status_looks_like_priority_and_omit() -> None:
         )["looks_like"]
         == "textbox"
     )
+    both = shape_public_status(
+        {"classifiers": {"battle_likely": True, "textbox_likely": True}}
+    )
+    assert both["looks_like"] == "textbox"
     assert (
         shape_public_status(
             {"classifiers": {"start_menu_likely": True, "window_occluded_likely": True}}
@@ -229,6 +237,30 @@ def test_shape_public_status_looks_like_priority_and_omit() -> None:
     assert "looks_like" not in shape_public_status(
         {"classifiers": {"battle_likely": False, "textbox_likely": False}}
     )
+
+
+def test_shape_public_status_stopped_reason_and_optional_flags() -> None:
+    public = shape_public_status(
+        {
+            "stop_reason": "default_hold_abort",
+            "stop_detail": "battle",
+            "classifiers": {"battle_likely": True, "textbox_likely": False},
+            "player_moved": False,
+            "textbox_complete": False,
+            "frames_advanced": 20,
+            "running": True,
+        }
+    )
+    assert public["stopped_reason"] == "battle"
+    assert public["looks_like"] == "battle"
+    assert public["player_moved"] is False
+    assert public["textbox_complete"] is False
+    assert "ocr_text" not in public
+    timeout = shape_public_status({"stop_reason": "call_timeout", "running": True})
+    assert timeout["stopped_reason"] == "timeout"
+    blocked = shape_public_status({"stop_reason": "blocked", "player_moved": False})
+    assert blocked["stopped_reason"] == "blocked"
+    assert blocked["player_moved"] is False
 
 
 def test_shape_status_keeps_internal_engine_fields() -> None:

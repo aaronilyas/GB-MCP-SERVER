@@ -25,6 +25,8 @@ from gb_mcp.emulator.vision import (
     capture_native,
     classify,
     hash_named_regions,
+    player_moved_from_frames,
+    textbox_complete,
 )
 
 # Mash / long hold: sample internally, then pack one short GIF. Not a public mode.
@@ -53,7 +55,12 @@ def execute_play_command(
             # asdict(PlayInput) for a buttons chord includes both; steps win.
             raw.pop("buttons", None)
         play = parse_play_input(raw, session_speed=session_speed)
+    if play.intent:
+        from gb_mcp.emulator.intents import execute_intent
+
+        return execute_intent(pyboy, play, session_speed=session_speed, monotonic=monotonic)
     public_mode = play.screenshot_mode
+    media = str((play.extra or {}).get("media") or "image")
     play, sampled_internally = _with_internal_keyframes(play)
     baseline = capture_native(pyboy)
     monitor = UntilMonitor(play, baseline)
@@ -75,7 +82,8 @@ def execute_play_command(
     if final_frame is None:
         final_frame = baseline
     result.setdefault("region_hashes", hash_named_regions(final_frame, play.hash_regions or DEFAULT_HASH_REGIONS))
-    result.setdefault("classifiers", classify(final_frame))
+    flags = classify(final_frame)
+    result.setdefault("classifiers", flags)
     result.setdefault("screenshot_scale", play.screenshot_scale)
     result.setdefault("native_size", list(NATIVE_SIZE))
     result.setdefault("emulation_speed", play.emulation_speed)
@@ -84,15 +92,21 @@ def execute_play_command(
     result.setdefault("default_hold_abort_applied", play.apply_default_hold_abort)
     result.setdefault("gap_frames", play.gap_frames)
     result.setdefault("screenshot_mode", public_mode)
+    result["player_moved"] = player_moved_from_frames(baseline, final_frame)
+    if flags.get("textbox_likely"):
+        result["textbox_complete"] = textbox_complete(final_frame)
     if getattr(plan, "interrupt_frame_index", None) is not None:
         result.setdefault("interrupt_frame_index", plan.interrupt_frame_index)
     if play.ocr:
         result.update(_maybe_ocr(result.get("pngs") or []))
+    elif flags.get("textbox_likely"):
+        _attach_public_ocr(result)
     _apply_action_media(
         result,
         want_gif=wants_action_gif(play),
         public_screenshot_mode=public_mode,
         sampled_internally=sampled_internally,
+        media=media,
     )
     return strip_forbidden_keys(result)
 
@@ -106,6 +120,26 @@ def _maybe_ocr(pngs: list[bytes]) -> dict[str, Any]:
         return ocr_pngs(pngs)
     except Exception as exc:  # noqa: BLE001
         return {"ocr_text": None, "ocr_engine": None, "ocr_error": str(exc) or "disabled"}
+
+
+def _attach_public_ocr(result: dict[str, Any]) -> None:
+    """OCR the inner textbox of the last native PNG. Never fail the play call."""
+    natives = result.get("pngs_native") or result.get("pngs") or []
+    if not isinstance(natives, list) or not natives:
+        return
+    blob = natives[-1]
+    if not isinstance(blob, (bytes, bytearray)) or not blob:
+        return
+    try:
+        from gb_mcp.emulator.ocr import ocr_textbox_png
+    except Exception:
+        return
+    try:
+        text = ocr_textbox_png(bytes(blob))
+    except Exception:
+        return
+    if text:
+        result["ocr_text"] = text
 
 
 def wants_action_gif(play: Any) -> bool:
@@ -135,6 +169,8 @@ def pack_action_media(pngs: list[bytes], *, want_gif: bool) -> dict[str, Any]:
 
 
 def _with_internal_keyframes(play: PlayInput) -> tuple[PlayInput, bool]:
+    # Public keyframes keep the PNG list. The legacy mash/hold GIF path still
+    # samples internally when the caller asked for screenshot_mode=final.
     if play.screenshot_mode != "final" or not wants_action_gif(play):
         return play, False
     return replace(play, screenshot_mode="keyframes"), True
@@ -146,20 +182,27 @@ def _apply_action_media(
     want_gif: bool,
     public_screenshot_mode: str,
     sampled_internally: bool,
+    media: str = "image",
 ) -> None:
     pngs = result.get("pngs") or []
     if not isinstance(pngs, list):
         pngs = [pngs]
-    if not want_gif:
+    keep_natives = public_screenshot_mode == "keyframes" and not sampled_internally
+    emit_gif = want_gif and (sampled_internally or media == "video")
+    if not emit_gif:
         return
-    media = pack_action_media(pngs, want_gif=True)
-    result["pngs"] = media.get("pngs") or []
-    gif = media.get("gif")
+    packed = pack_action_media(pngs, want_gif=True)
+    gif = packed.get("gif")
     if gif:
         result["gif"] = gif
     else:
         result.pop("gif", None)
         result.pop("gifs", None)
+    if keep_natives:
+        # GIF is extra for media=video; public JSON still gets the keyframe PNG list.
+        result["screenshot_count"] = len(result.get("pngs_native") or result.get("pngs") or [])
+        return
+    result["pngs"] = packed.get("pngs") or []
     result["screenshot_count"] = len(result["pngs"])
     if sampled_internally:
         result["screenshot_mode"] = public_screenshot_mode or "final"

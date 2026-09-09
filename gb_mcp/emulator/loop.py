@@ -19,6 +19,7 @@ from gb_mcp import config
 from gb_mcp.emulator.play_limits import (
     BUTTONS,
     DEFAULT_EMULATION_SPEED,
+    PUBLIC_STOPPED_REASONS,
 )
 
 PyBoyFactory = Callable[[Path], Any]
@@ -88,16 +89,29 @@ def shape_status(
 
 
 PUBLIC_STATUS_KEYS = frozenset(
-    {"ok", "frames", "stopped", "game", "looks_like", "error", "screenshots"}
+    {
+        "ok",
+        "frames",
+        "stopped",
+        "game",
+        "looks_like",
+        "error",
+        "screenshots",
+        "stopped_reason",
+        "player_moved",
+        "textbox_complete",
+        "ocr_text",
+    }
 )
 
-# First matching True classifier wins.
+# First matching True classifier wins. Textbox outranks a false battle HUD.
 _LOOKS_LIKE_PRIORITY: tuple[tuple[str, str], ...] = (
-    ("battle_likely", "battle"),
     ("textbox_likely", "textbox"),
+    ("battle_likely", "battle"),
     ("start_menu_likely", "menu"),
     ("window_occluded_likely", "fade"),
 )
+_PUBLIC_STOPPED = PUBLIC_STOPPED_REASONS
 
 
 def _as_text(value: object) -> str | None:
@@ -132,7 +146,7 @@ def _public_game(internal: dict[str, Any]) -> str | None:
     return None
 
 
-def _public_looks_like(internal: dict[str, Any]) -> str | None:
+def _classifier_flags(internal: dict[str, Any]) -> dict[str, Any]:
     flags: dict[str, Any] = {}
     classifiers = internal.get("classifiers")
     if isinstance(classifiers, dict):
@@ -140,9 +154,56 @@ def _public_looks_like(internal: dict[str, Any]) -> str | None:
     for src, _label in _LOOKS_LIKE_PRIORITY:
         if src in internal:
             flags[src] = internal[src]
-    for src, label in _LOOKS_LIKE_PRIORITY:
-        if flags.get(src) is True:
-            return label
+    return flags
+
+
+def _public_looks_like(internal: dict[str, Any]) -> str | None:
+    flags = _classifier_flags(internal)
+    if flags.get("textbox_likely") is True:
+        return "textbox"
+    if flags.get("battle_likely") is True:
+        return "battle"
+    if flags.get("start_menu_likely") is True:
+        return "menu"
+    if flags.get("window_occluded_likely") is True:
+        return "fade"
+    return None
+
+
+def _public_stopped_reason(internal: dict[str, Any]) -> str | None:
+    mapped = internal.get("stopped_reason")
+    if isinstance(mapped, str) and mapped in _PUBLIC_STOPPED:
+        return mapped
+    stop = internal.get("stop_reason")
+    detail = internal.get("stop_detail")
+    if isinstance(detail, str) and detail in _PUBLIC_STOPPED:
+        return detail
+    if not isinstance(stop, str) or not stop:
+        return None
+    if stop in _PUBLIC_STOPPED:
+        return stop
+    if stop == "call_timeout":
+        return "timeout"
+    if stop == "idle_timeout":
+        return "timeout"
+    if stop in {"completed", "stable", "hash_match", "hash_mismatch"}:
+        return "completed"
+    if stop == "blocked":
+        return "blocked"
+    if stop == "fade":
+        return "fade"
+    flags = _classifier_flags(internal)
+    if stop in {"classifier", "default_hold_abort"}:
+        if flags.get("textbox_likely") is True:
+            return "textbox"
+        if flags.get("battle_likely") is True:
+            return "battle"
+        if flags.get("start_menu_likely") is True:
+            return "menu"
+        if stop == "default_hold_abort":
+            return "fade"
+    if stop == "screen_change":
+        return "fade"
     return None
 
 
@@ -186,11 +247,12 @@ def shape_public_status(internal: dict[str, Any]) -> dict[str, Any]:
     """Map an internal play/status payload to the model-facing dict.
 
     Always includes ``ok``, ``frames``, ``stopped``, and ``game``. Adds
-    ``looks_like`` when a classifier is true (battle > textbox > menu > fade)
-    and ``error`` on failure. Builds a new dict so hashes, paths, idle
-    timers, OCR, classifier objects, and internal screenshot metadata cannot
-    leak through. Public ``screenshots`` (native PNG base64) are attached by
-    the play tool after this shaper runs.
+    ``looks_like`` when a classifier is true (textbox > battle > menu > fade)
+    and ``error`` on failure. Optional ``stopped_reason``, ``player_moved``,
+    ``textbox_complete``, and ``ocr_text`` are LCD-derived. Builds a new dict
+    so hashes, paths, idle timers, classifier objects, and internal screenshot
+    metadata cannot leak through. Public ``screenshots`` (native PNG base64)
+    are attached by the play tool after this shaper runs.
     """
     payload: dict[str, Any] = {
         "ok": _public_ok(internal),
@@ -201,6 +263,16 @@ def shape_public_status(internal: dict[str, Any]) -> dict[str, Any]:
     looks_like = _public_looks_like(internal)
     if looks_like is not None:
         payload["looks_like"] = looks_like
+    stopped_reason = _public_stopped_reason(internal)
+    if stopped_reason is not None:
+        payload["stopped_reason"] = stopped_reason
+    if "player_moved" in internal:
+        payload["player_moved"] = bool(internal.get("player_moved"))
+    if "textbox_complete" in internal:
+        payload["textbox_complete"] = bool(internal.get("textbox_complete"))
+    ocr_text = internal.get("ocr_text")
+    if isinstance(ocr_text, str) and ocr_text.strip():
+        payload["ocr_text"] = ocr_text.strip()
     error = _public_error(internal)
     if error is not None:
         payload["error"] = error

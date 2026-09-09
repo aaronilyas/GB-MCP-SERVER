@@ -15,14 +15,20 @@ import numpy as np
 from PIL import Image
 
 from gb_mcp.emulator.play_limits import (
+    BLOCKED_CROP_DELTA,
+    BLOCKED_CROP_PREV_DELTA,
+    BLOCKED_FULL_DELTA,
     DEFAULT_HASH_REGIONS,
     DEFAULT_HOLD_ABORT_LUMA_JUMP,
     DEFAULT_HOLD_ABORT_THRESHOLD,
     DEFAULT_REGION,
     DEFAULT_SCREENSHOT_SCALE,
+    DEFAULT_STABLE_FRAMES,
     MAX_SCREENSHOT_ALL,
     NATIVE_HEIGHT,
     NATIVE_WIDTH,
+    PLAYER_MOVED_FULL_DELTA,
+    PLAYER_SPRITE_REGION,
     SCREENSHOT_SCALES,
 )
 
@@ -240,10 +246,77 @@ def _strip_in_band(strips: list[tuple[int, int]], y0: int, y1: int) -> bool:
     return any(y0 <= start + thickness // 2 < y1 for start, thickness in strips)
 
 
+def _greenish(mean_rgb: np.ndarray) -> bool:
+    r, g, b = (float(part) for part in mean_rgb)
+    return g >= r - 2 and g >= b - 2 and g > 30.0
+
+
+def _fight_menu_pane_likely(rgb: np.ndarray) -> bool:
+    """Light command box in the bottom-right (Gen 1 FIGHT / PKMN / ITEM / RUN)."""
+    if rgb.shape[0] < 96 or rgb.shape[1] < 96:
+        return False
+    pane = rgb[80:144, 80:160]
+    rest = rgb[80:144, :80]
+    if pane.size == 0 or rest.size == 0:
+        return False
+    pane_lum = _luminance(pane)
+    rest_lum = _luminance(rest)
+    if float((pane_lum >= _MENU_LIGHT_MIN).mean()) < 0.40:
+        return False
+    return float(pane_lum.mean()) - float(rest_lum.mean()) >= 20.0
+
+
+def _fence_rows_likely(lum: np.ndarray) -> bool:
+    """Dark/light oscillating rows (ball fence / ledge posts), not HP bars."""
+    if lum.size == 0:
+        return False
+    hits = 0
+    for row in lum:
+        dark = row < 80.0
+        frac = float(dark.mean())
+        if frac < 0.12 or frac > 0.78:
+            continue
+        transitions = int(np.count_nonzero(dark[1:] != dark[:-1]))
+        if transitions >= 10:
+            hits += 1
+            if hits >= 5:
+                return True
+    return False
+
+
+def _tree_belt_likely(rgb: np.ndarray) -> bool:
+    """Darker green top belt vs mid field (Pallet/route trees), not a fight HUD."""
+    if rgb.shape[0] < 96:
+        return False
+    top = rgb[:40]
+    mid = rgb[40:96]
+    top_mean = top.reshape(-1, 3).mean(axis=0)
+    mid_mean = mid.reshape(-1, 3).mean(axis=0)
+    if not (_greenish(top_mean) and _greenish(mid_mean)):
+        return False
+    top_lum = float(_luminance(top).mean())
+    mid_lum = float(_luminance(mid).mean())
+    return (mid_lum - top_lum) >= 25.0
+
+
+def _overworld_reject(rgb: np.ndarray) -> bool:
+    """Fence / tree-belt / grass without a fight-menu pane must not look like battle."""
+    if _fight_menu_pane_likely(rgb):
+        return False
+    lum = _luminance(rgb)
+    if _fence_rows_likely(lum):
+        return True
+    if _tree_belt_likely(rgb):
+        return True
+    return False
+
+
 def _battle_likely(rgb: np.ndarray) -> bool:
-    """Gen 1 fight LCD: HP-bar strips in enemy/player slots, not overworld."""
+    """Gen 1 fight LCD: both HP slots plus a HUD cue; never overworld."""
     # textbox/start-menu helpers must not call back into _battle_likely.
     if _textbox_likely(rgb) or _start_menu_likely(rgb):
+        return False
+    if _overworld_reject(rgb):
         return False
     lum = _luminance(rgb)
     height = lum.shape[0]
@@ -252,20 +325,89 @@ def _battle_likely(rgb: np.ndarray) -> bool:
     bot_mean = rgb[-third:].reshape(-1, 3).mean(axis=0)
     split = float(np.abs(top_mean - bot_mean).mean())
     strips = _light_horizontal_strips(lum)
-    # Enemy HUD ~y=0–48, player HUD ~y=72–120 on 160×144; scale with height.
     enemy_hi = third
     player_lo = height // 2
     player_hi = height * 5 // 6
     slotted = _strip_in_band(strips, 0, enemy_hi) and _strip_in_band(
         strips, player_lo, player_hi
     )
-    # Position first: grass fight LCDs still hit even with a modest split.
-    if slotted:
-        return True
-    if len(strips) < 2 or split <= _BATTLE_SPLIT_MIN:
+    if not slotted:
         return False
-    centers = sorted(start + thickness / 2.0 for start, thickness in strips)
-    return float(centers[-1] - centers[0]) >= float(third)
+    if _fight_menu_pane_likely(rgb) or split > _BATTLE_SPLIT_MIN:
+        return True
+    return False
+
+
+def _textbox_complete(rgb: np.ndarray) -> bool:
+    """Dark ▼ / triangle in the inner textbox, after a finished line."""
+    if not _textbox_likely(rgb):
+        return False
+    lum = _luminance(rgb)
+    # Stay inside the inner window [100:140, 8:152], away from the dark frame.
+    patch = lum[128:138, 128:148]
+    if patch.size == 0:
+        return False
+    dark = patch < 90.0
+    frac = float(dark.mean())
+    if frac < 0.08 or frac > 0.50:
+        return False
+    h = int(dark.shape[0])
+    upper = dark[: max(1, h // 2)]
+    lower = dark[max(0, h - 2) :]
+    if int(upper.sum()) < 6 or int(upper.sum()) <= int(lower.sum()):
+        return False
+    spans: list[int] = []
+    for row in dark:
+        idx = np.flatnonzero(row)
+        spans.append(int(idx[-1] - idx[0] + 1) if idx.size else 0)
+    nonzero = [span for span in spans if span > 0]
+    if len(nonzero) < 3:
+        return False
+    return nonzero[0] >= 3 and nonzero[-1] < nonzero[0]
+
+
+def textbox_complete(frame: Any) -> bool:
+    return _textbox_complete(_as_rgb(frame))
+
+
+def player_moved_from_frames(baseline: Any, current: Any) -> bool:
+    """True when the full LCD moved this call (camera scroll counts as moving)."""
+    return pixel_delta_fraction(baseline, current, DEFAULT_REGION) > PLAYER_MOVED_FULL_DELTA
+
+
+_CURSOR_CELLS: tuple[tuple[str, int, int, int, int], ...] = (
+    ("fight", 88, 104, 36, 20),
+    ("pkmn", 124, 104, 36, 20),
+    ("item", 88, 124, 36, 20),
+    ("run", 124, 124, 36, 20),
+)
+
+
+def fight_menu_visible(frame: Any) -> bool:
+    rgb = _as_rgb(frame)
+    return _battle_likely(rgb) and _fight_menu_pane_likely(rgb)
+
+
+def fight_cursor_cell(frame: Any) -> str | None:
+    """Which Gen 1 2×2 fight-menu cell holds a dark ▶, or None."""
+    rgb = _as_rgb(frame)
+    if not _fight_menu_pane_likely(rgb) and not _battle_likely(rgb):
+        return None
+    lum = _luminance(rgb)
+    best_name: str | None = None
+    best_score = 0.0
+    for name, x, y, _w, h in _CURSOR_CELLS:
+        cell = lum[y : y + h, x : x + 12]
+        if cell.size == 0:
+            continue
+        dark = cell < 70.0
+        score = float(dark.mean())
+        if 0.08 <= score <= 0.70 and score > best_score:
+            best_score = score
+            best_name = name
+    if best_score < 0.12:
+        return None
+    return best_name
 
 
 def _menu_pane_likely(pane: np.ndarray, rest: np.ndarray) -> bool:
@@ -386,10 +528,24 @@ def classify(frame: Any) -> dict[str, bool]:
     }
 
 
+_CLASSIFIER_PUBLIC = {
+    "battle_likely": "battle",
+    "textbox_likely": "textbox",
+    "start_menu_likely": "menu",
+}
+
+
 class StopDecision:
-    def __init__(self, reason: str, until_fired: bool = True) -> None:
+    def __init__(
+        self,
+        reason: str,
+        until_fired: bool = True,
+        *,
+        detail: str | None = None,
+    ) -> None:
         self.reason = reason
         self.until_fired = until_fired
+        self.detail = detail
 
 
 class UntilMonitor:
@@ -398,10 +554,13 @@ class UntilMonitor:
         self.baseline_frame = np.array(_as_rgb(baseline_frame), copy=True, order="C")
         self._prev_eval_frame: np.ndarray | None = None
         self._stable_streak = 0
+        self._blocked_streak = 0
         self._classifier_seen_true = False
         self._disappear_met_at_baseline = False
+        self._occluded_seen = False
         self._baseline_classifiers = classify(self.baseline_frame)
         self._baseline_luma = float(_luminance(self.baseline_frame).mean())
+        self._occluded_seen = bool(self._baseline_classifiers.get("window_occluded_likely"))
         until = getattr(play, "until", None)
         classifier = getattr(until, "classifier", None) if until is not None else None
         if until is not None and until.on == "classifier" and classifier:
@@ -423,28 +582,93 @@ class UntilMonitor:
     def _eval_default_hold_abort(self, frame: np.ndarray) -> StopDecision | None:
         if not getattr(self.play, "apply_default_hold_abort", False):
             return None
+        blocked = self._eval_blocked(frame, as_until=False)
+        if blocked is not None:
+            return StopDecision("default_hold_abort", True, detail="blocked")
         threshold = float(
             getattr(self.play, "default_hold_abort_threshold", DEFAULT_HOLD_ABORT_THRESHOLD)
         )
         delta = pixel_delta_fraction(self.baseline_frame, frame, DEFAULT_REGION)
         if delta <= threshold:
             return None
-        # Second gate: battle/menu appearance or a fade-sized luma jump, not camera scroll.
+        # Second gate: battle/text/menu appearance or a fade-sized luma jump, not camera scroll.
         current = classify(frame)
         battle_became = (not self._baseline_classifiers.get("battle_likely")) and bool(
             current.get("battle_likely")
         )
+        textbox_became = (not self._baseline_classifiers.get("textbox_likely")) and bool(
+            current.get("textbox_likely")
+        )
         menu_became = (not self._baseline_classifiers.get("start_menu_likely")) and bool(
             current.get("start_menu_likely")
         )
-        if battle_became or menu_became:
-            return StopDecision("default_hold_abort", True)
+        if battle_became:
+            return StopDecision("default_hold_abort", True, detail="battle")
+        if textbox_became:
+            return StopDecision("default_hold_abort", True, detail="textbox")
+        if menu_became:
+            return StopDecision("default_hold_abort", True, detail="menu")
         luma_limit = float(
             getattr(self.play, "default_hold_abort_luma_jump", DEFAULT_HOLD_ABORT_LUMA_JUMP)
         )
         luma_jump = abs(float(_luminance(frame).mean()) - self._baseline_luma)
         if luma_jump > luma_limit:
-            return StopDecision("default_hold_abort", True)
+            return StopDecision("default_hold_abort", True, detail="fade")
+        return None
+
+    def _blocked_needed(self, *, as_until: bool) -> int:
+        until = getattr(self.play, "until", None)
+        if as_until and until is not None and getattr(until, "stable_frames", None):
+            return int(until.stable_frames)
+        return int(DEFAULT_STABLE_FRAMES)
+
+    def _is_blocked(self, frame: np.ndarray) -> bool:
+        if self._prev_eval_frame is None:
+            return False
+        full_prev = pixel_delta_fraction(self._prev_eval_frame, frame, DEFAULT_REGION)
+        if full_prev > BLOCKED_FULL_DELTA:
+            return False
+        crop_start = pixel_delta_fraction(self.baseline_frame, frame, PLAYER_SPRITE_REGION)
+        crop_prev = pixel_delta_fraction(self._prev_eval_frame, frame, PLAYER_SPRITE_REGION)
+        return crop_start <= BLOCKED_CROP_DELTA or crop_prev <= BLOCKED_CROP_PREV_DELTA
+
+    def _eval_blocked(self, frame: np.ndarray, *, as_until: bool) -> StopDecision | None:
+        if self._is_blocked(frame):
+            self._blocked_streak += 1
+        else:
+            self._blocked_streak = 0
+        if self._blocked_streak >= self._blocked_needed(as_until=as_until):
+            return StopDecision("blocked", True, detail="blocked")
+        return None
+
+    def _eval_luma_jump(self, frame: np.ndarray) -> StopDecision | None:
+        luma_limit = float(
+            getattr(self.play, "default_hold_abort_luma_jump", DEFAULT_HOLD_ABORT_LUMA_JUMP)
+        )
+        luma_jump = abs(float(_luminance(frame).mean()) - self._baseline_luma)
+        occluded = bool(classify(frame).get("window_occluded_likely"))
+        if occluded:
+            self._occluded_seen = True
+        if luma_jump > luma_limit:
+            return StopDecision("fade", True, detail="fade")
+        if self._occluded_seen and not occluded:
+            return StopDecision("fade", True, detail="fade")
+        return None
+
+    def _eval_overworld(self, frame: np.ndarray, until: Any) -> StopDecision | None:
+        if bool(classify(frame).get("battle_likely")):
+            self._stable_streak = 0
+            return None
+        if self._prev_eval_frame is None:
+            return None
+        region = until.region or DEFAULT_REGION
+        delta = pixel_delta_fraction(self._prev_eval_frame, frame, region)
+        if delta < until.threshold:
+            self._stable_streak += 1
+        else:
+            self._stable_streak = 0
+        if self._stable_streak >= until.stable_frames:
+            return StopDecision("stable", True, detail="completed")
         return None
 
     def _eval_caller_until(self, frame: np.ndarray) -> StopDecision | None:
@@ -455,7 +679,7 @@ class UntilMonitor:
         on = until.on
         if on == "pixel_delta_above":
             if pixel_delta_fraction(self.baseline_frame, frame, region) > until.threshold:
-                return StopDecision("screen_change")
+                return StopDecision("screen_change", detail="fade")
             return None
         if on == "pixel_delta_below":
             if pixel_delta_fraction(self.baseline_frame, frame, region) < until.threshold:
@@ -484,6 +708,12 @@ class UntilMonitor:
             return None
         if on == "classifier":
             return self._eval_classifier(frame, until)
+        if on == "luma_jump":
+            return self._eval_luma_jump(frame)
+        if on == "blocked":
+            return self._eval_blocked(frame, as_until=True)
+        if on == "overworld":
+            return self._eval_overworld(frame, until)
         return None
 
     def _eval_classifier(self, frame: np.ndarray, until: Any) -> StopDecision | None:
@@ -492,17 +722,18 @@ class UntilMonitor:
             return None
         present = bool(classify(frame).get(name))
         polarity = until.classifier_polarity
+        public = _CLASSIFIER_PUBLIC.get(name, name)
         if polarity == "appears":
             if present:
                 self._classifier_seen_true = True
-                return StopDecision("classifier")
+                return StopDecision("classifier", detail=public)
             return None
         # disappears: fire when False after seeing True, or if baseline was already False.
         if present:
             self._classifier_seen_true = True
             return None
         if self._classifier_seen_true or self._disappear_met_at_baseline:
-            return StopDecision("classifier")
+            return StopDecision("classifier", detail=public)
         return None
 
 

@@ -24,10 +24,13 @@ from gb_mcp.emulator.vision import (
     capture_native,
     classify,
     encode_png,
+    fight_cursor_cell,
     hash_named_regions,
     pixel_delta_fraction,
+    player_moved_from_frames,
     region_hash,
     scale_nearest,
+    textbox_complete,
 )
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
@@ -474,3 +477,154 @@ def test_window_occluded_slab_not_textbox_or_fade() -> None:
         flags = classify(slab)
         assert flags["window_occluded_likely"] is True
         assert flags["textbox_likely"] is False
+
+
+def test_lcd_fixtures_battle_likely_overworld_vs_fight() -> None:
+    pallet = _load_fixture("lcd/pallet_like.png")
+    fence = _load_fixture("lcd/fence_like.png")
+    grass = _load_fixture("lcd/grass_like.png")
+    fight = _load_fixture("lcd/fight_hud.png")
+    assert classify(pallet)["battle_likely"] is False
+    assert classify(fence)["battle_likely"] is False
+    assert classify(grass)["battle_likely"] is False
+    assert classify(_pallet_like_overworld())["battle_likely"] is False
+    flags = classify(fight)
+    assert flags["battle_likely"] is True
+    assert flags["textbox_likely"] is False
+    assert fight_cursor_cell(fight) == "fight"
+
+
+def test_textbox_complete_triangle() -> None:
+    empty = _dialogue_bar()
+    assert classify(empty)["textbox_likely"] is True
+    assert textbox_complete(empty) is False
+    prompt = _load_fixture("lcd/textbox_prompt.png")
+    assert classify(prompt)["textbox_likely"] is True
+    assert textbox_complete(prompt) is True
+
+
+def test_public_fade_is_luma_jump_not_camera_scroll() -> None:
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 40,
+            "until": {"on": "luma_jump"},
+            "disable_default_hold_abort": True,
+        }
+    )
+    base = _overworld_field()
+    monitor = UntilMonitor(play, base)
+    for shift in range(1, 17):
+        frame = np.roll(base, shift, axis=0)
+        assert monitor.evaluate(frame, shift) is None
+    black = UntilMonitor(play, base).evaluate(_solid((0, 0, 0)), 0)
+    assert black is not None
+    assert black.reason == "fade"
+    assert black.detail == "fade"
+    assert player_moved_from_frames(base, np.roll(base, 8, axis=0)) is True
+    assert player_moved_from_frames(base, base.copy()) is False
+
+
+def test_blocked_crop_still_and_scroll_is_not_blocked() -> None:
+    wall = _load_fixture("lcd/blocked_wall.png")
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 80,
+            "until": {"on": "blocked", "stable_frames": 3},
+            "until_eval_interval": 1,
+            "disable_default_hold_abort": True,
+        }
+    )
+    monitor = UntilMonitor(play, wall)
+    decision = None
+    for index in range(6):
+        decision = monitor.evaluate(wall, index)
+        if decision is not None:
+            break
+    assert decision is not None
+    assert decision.reason == "blocked"
+
+    field = _overworld_field()
+    scroll_play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 40,
+            "until": {"on": "blocked", "stable_frames": 3},
+            "disable_default_hold_abort": True,
+        }
+    )
+    scrolling = UntilMonitor(scroll_play, field)
+    for shift in range(1, 12):
+        assert scrolling.evaluate(np.roll(field, shift, axis=0), shift) is None
+
+
+def test_until_textbox_disappears_does_not_fire_while_box_is_up() -> None:
+    play = parse_play_input(
+        {
+            "buttons": ["a"],
+            "hold_frames": 40,
+            "until": {
+                "on": "classifier",
+                "classifier": "textbox_likely",
+                "classifier_polarity": "disappears",
+            },
+        }
+    )
+    box = _dialogue_bar()
+    field = _overworld_field()
+    monitor = UntilMonitor(play, box)
+    assert classify(box)["textbox_likely"] is True
+    assert monitor.evaluate(box, 0) is None
+    assert monitor.evaluate(box, 1) is None
+    gone = monitor.evaluate(field, 2)
+    assert gone is not None
+    assert gone.reason == "classifier"
+    assert gone.detail == "textbox"
+
+
+def test_default_hold_abort_blocked_on_static_wall() -> None:
+    wall = _load_fixture("lcd/blocked_wall.png")
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 80,
+            "until_eval_interval": 1,
+        }
+    )
+    assert play.apply_default_hold_abort is True
+    monitor = UntilMonitor(play, wall)
+    decision = None
+    for index in range(16):
+        decision = monitor.evaluate(wall, index)
+        if decision is not None:
+            break
+    assert decision is not None
+    assert decision.reason == "default_hold_abort"
+    assert decision.detail == "blocked"
+
+
+def test_screenshot_plan_keyframes_keep_interrupt() -> None:
+    start = _overworld_field()
+    battle = _battle()
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 40,
+            "screenshot_mode": "keyframes",
+            "screenshot_scale": 1,
+            "disable_default_hold_abort": True,
+        }
+    )
+    plan = ScreenshotPlan(play)
+    plan.record(8, start, interrupt=False, final=False)
+    plan.record(12, battle, interrupt=True, final=True)
+    packed = plan.package(play)
+    kinds = [item["kind"] for item in packed["screenshots"]]
+    assert any("interrupt" in kind for kind in kinds)
+    assert len(packed["pngs_native"]) >= 1

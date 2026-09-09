@@ -18,7 +18,7 @@ BUTTONS = frozenset({"a", "b", "start", "select", "up", "down", "left", "right"}
 MAX_INPUT_STEPS = 500
 MAX_HOLD_FRAMES = 3600
 MAX_FRAMES_PER_CALL = 3600
-MAX_GAP_FRAMES = 60
+MAX_GAP_FRAMES = 180
 MAX_UNTIL_EVAL_INTERVAL = 15
 MIN_UNTIL_EVAL_INTERVAL = 1
 MAX_SCREENSHOT_ALL = 30
@@ -36,6 +36,9 @@ UNTIL_ONS = frozenset(
         "region_hash_eq",
         "region_hash_neq",
         "classifier",
+        "luma_jump",
+        "blocked",
+        "overworld",
         "none",
     }
 )
@@ -53,8 +56,24 @@ STOP_REASONS = frozenset(
         "default_hold_abort",
         "call_timeout",
         "idle_timeout",
+        "blocked",
+        "fade",
     }
 )
+PUBLIC_STOPPED_REASONS = frozenset(
+    {
+        "completed",
+        "battle",
+        "textbox",
+        "menu",
+        "fade",
+        "blocked",
+        "max_frames",
+        "timeout",
+    }
+)
+PUBLIC_INTENTS = frozenset({"advance_text", "run_away", "battle_turn"})
+PUBLIC_KEYFRAME_MIN_FRAMES = 24
 
 # Defaults (breaking vs the previous 1x / 5-minute / native-PNG path).
 DEFAULT_EMULATION_SPEED = 0  # uncapped; pyboy.set_emulation_speed(0)
@@ -70,6 +89,9 @@ DEFAULT_HOLD_ABORT_LUMA_JUMP = 80.0
 DEFAULT_MASH_BUTTON = "a"
 DEFAULT_MASH_PRESS_FRAMES = 4
 DEFAULT_MASH_RELEASE_FRAMES = 4
+# Public PlayArgs mash only (Gen 1 typewriter skip). Engine PlayInput stays 4/4.
+PUBLIC_MASH_PRESS_FRAMES = 12
+PUBLIC_MASH_RELEASE_FRAMES = 8
 DEFAULT_GAP_FRAMES = 0
 DEFAULT_CALL_TIMEOUT_SECONDS = 20.0
 MAX_CALL_TIMEOUT_SECONDS = 70.0
@@ -78,11 +100,18 @@ MAX_CALL_TIMEOUT_SECONDS = 70.0
 DEFAULT_REGION = (0, 0, NATIVE_WIDTH, NATIVE_HEIGHT)
 BOTTOM_REGION = (0, 96, 160, 48)
 CENTER_REGION = (40, 32, 80, 80)
+# Gen 1 player sprite is typically centered; 16×16 at (72, 72) is the public heuristic.
+PLAYER_SPRITE_REGION = (72, 72, 16, 16)
 DEFAULT_HASH_REGIONS: dict[str, tuple[int, int, int, int]] = {
     "full": DEFAULT_REGION,
     "bottom": BOTTOM_REGION,
     "center": CENTER_REGION,
 }
+# Blocked: full-screen still vs previous eval, crop still vs start or previous.
+BLOCKED_FULL_DELTA = 0.04
+BLOCKED_CROP_DELTA = 0.10
+BLOCKED_CROP_PREV_DELTA = 0.50
+PLAYER_MOVED_FULL_DELTA = 0.04
 
 # Command wait is slightly above the engine wall-clock so the engine can
 # return stop_reason=call_timeout instead of raising TimeoutError.
@@ -158,5 +187,8 @@ SEND_INPUT_RESPONSE_KEYS = frozenset(
         "ocr_engine",
         "ocr_error",
         "error",
+        "stop_detail",
+        "player_moved",
+        "textbox_complete",
     }
 )
