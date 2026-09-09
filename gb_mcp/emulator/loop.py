@@ -88,7 +88,7 @@ def shape_status(
 
 
 PUBLIC_STATUS_KEYS = frozenset(
-    {"ok", "frames", "stopped", "game", "looks_like", "error"}
+    {"ok", "frames", "stopped", "game", "looks_like", "error", "screenshots"}
 )
 
 # First matching True classifier wins.
@@ -188,7 +188,9 @@ def shape_public_status(internal: dict[str, Any]) -> dict[str, Any]:
     Always includes ``ok``, ``frames``, ``stopped``, and ``game``. Adds
     ``looks_like`` when a classifier is true (battle > textbox > menu > fade)
     and ``error`` on failure. Builds a new dict so hashes, paths, idle
-    timers, OCR, and classifier objects cannot leak through.
+    timers, OCR, classifier objects, and internal screenshot metadata cannot
+    leak through. Public ``screenshots`` (native PNG base64) are attached by
+    the play tool after this shaper runs.
     """
     payload: dict[str, Any] = {
         "ok": _public_ok(internal),
@@ -485,9 +487,12 @@ class EmulatorSession:
                     pass
         self._last_input_at = time.monotonic()
         pngs = result.get("pngs")
+        pngs_native = result.get("pngs_native")
         cleaned = strip_forbidden_keys(result)
         if pngs is not None:
             cleaned["pngs"] = pngs
+        if pngs_native is not None:
+            cleaned["pngs_native"] = pngs_native
         return cleaned
 
     def _save_snapshot(self) -> None:

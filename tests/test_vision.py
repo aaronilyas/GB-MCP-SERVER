@@ -262,6 +262,23 @@ def test_scale_nearest_and_encode_png_magic() -> None:
         assert loaded.size[0] == NATIVE_WIDTH * scale
 
 
+def test_screenshot_plan_keeps_native_pngs_when_preview_is_scaled() -> None:
+    frame = _solid((12, 34, 56))
+    play = parse_play_input(
+        {"buttons": ["a"], "screenshot_mode": "final", "screenshot_scale": 4}
+    )
+    plan = ScreenshotPlan()
+    plan.record(1, frame, final=True)
+    packed = plan.package(play)
+    assert len(packed["pngs"]) == 1
+    assert len(packed["pngs_native"]) == 1
+    preview = PILImage.open(io.BytesIO(packed["pngs"][0]))
+    native = PILImage.open(io.BytesIO(packed["pngs_native"][0]))
+    assert preview.size == (NATIVE_WIDTH * 4, NATIVE_HEIGHT * 4)
+    assert native.size == (NATIVE_WIDTH, NATIVE_HEIGHT)
+    assert packed["pngs_native"][0].startswith(PNG_MAGIC)
+
+
 def test_screenshot_plan_keyframes_cap() -> None:
     frame = _solid((10, 20, 30))
     play = parse_play_input(

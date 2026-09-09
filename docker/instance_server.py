@@ -27,6 +27,7 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_EMULATION_SPEED,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     INPUT_COMMAND_TIMEOUT_SECONDS,
+    MAX_SCREENSHOT_ALL,
 )
 from gb_mcp.gb.header import inspect_rom_playable
 
@@ -143,14 +144,23 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+def _png_byte_list(value: Any) -> list[bytes]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    return [bytes(item) for item in items if isinstance(item, (bytes, bytearray)) and item]
+
+
 def encode_input_media(result: dict[str, Any]) -> dict[str, Any]:
-    """Replace pngs/gif bytes with at most one pngs_b64 and optional gif_b64."""
-    pngs = result.pop("pngs", [])
+    """Replace pngs/gif bytes with at most one pngs_b64 and optional gif_b64.
+
+    Native 160x144 stills stay on ``pngs_native_b64`` (capped at
+    ``MAX_SCREENSHOT_ALL``) so the host can put them in public JSON.
+    """
+    pngs_native = _png_byte_list(result.pop("pngs_native", []))
+    pngs = _png_byte_list(result.pop("pngs", []))
     gif = result.pop("gif", None)
     gifs = result.pop("gifs", None)
-    if not isinstance(pngs, list):
-        pngs = [pngs] if pngs else []
-    pngs = [bytes(item) for item in pngs if isinstance(item, (bytes, bytearray)) and item]
     if gif is None and isinstance(gifs, list) and gifs:
         gif = gifs[0]
     elif gif is None and isinstance(gifs, (bytes, bytearray)):
@@ -173,6 +183,12 @@ def encode_input_media(result: dict[str, Any]) -> dict[str, Any]:
         result["gif_b64"] = base64.b64encode(gif).decode("ascii")
     else:
         result.pop("gif_b64", None)
+    if pngs_native:
+        result["pngs_native_b64"] = [
+            base64.b64encode(item).decode("ascii") for item in pngs_native[:MAX_SCREENSHOT_ALL]
+        ]
+    else:
+        result.pop("pngs_native_b64", None)
     return result
 
 

@@ -2,20 +2,29 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
+import base64
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver.utilities.types import Image
 
 from gb_mcp.emulator import session as pyboy_sessions
-from gb_mcp.emulator.input_schema import PlayInput, parse_play_args, play_input_from_args
+from gb_mcp.emulator.input_schema import (
+    PlayInput,
+    parse_play_args,
+    parse_screenshot_mode,
+    play_input_from_args,
+)
 from gb_mcp.emulator.loop import shape_public_status
+from gb_mcp.emulator.play_limits import MAX_SCREENSHOT_ALL, NATIVE_HEIGHT, NATIVE_WIDTH
 from gb_mcp.gb.header import assert_rom_playable
 from gb_mcp.identity import require_email
 from gb_mcp.storage.roms import _rom_in_subdirectory
 from gb_mcp.storage.uploads import expire_uploads
 from gb_mcp.tools.catalog import list_games as catalog_list_games
+
+_PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
 def _jsonish(value: Any) -> Any:
@@ -40,6 +49,112 @@ def play_to_payload(play: PlayInput) -> dict[str, Any]:
 
 def _public(internal: dict[str, Any]) -> dict[str, Any]:
     return shape_public_status(internal)
+
+
+def _png_ihdr_size(blob: bytes) -> tuple[int, int] | None:
+    """Read width/height from a PNG IHDR without importing Pillow."""
+    if len(blob) < 24 or not blob.startswith(_PNG_MAGIC):
+        return None
+    if blob[12:16] != b"IHDR":
+        return None
+    width = int.from_bytes(blob[16:20], "big")
+    height = int.from_bytes(blob[20:24], "big")
+    return width, height
+
+
+def _as_png_list(value: Any) -> list[bytes]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    out: list[bytes] = []
+    for item in items:
+        if isinstance(item, (bytes, bytearray)) and item:
+            out.append(bytes(item))
+    return out
+
+
+def _decode_png_b64_list(value: Any) -> list[bytes]:
+    if not isinstance(value, list):
+        return []
+    out: list[bytes] = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            continue
+        try:
+            decoded = base64.b64decode(item)
+        except Exception:
+            continue
+        if decoded:
+            out.append(decoded)
+    return out
+
+
+def _native_pngs(result: dict[str, Any]) -> list[bytes]:
+    """Native 160x144 PNG bytes for public JSON. Never use the scaled preview."""
+    blobs = _as_png_list(result.get("pngs_native"))
+    if not blobs:
+        blobs = _decode_png_b64_list(result.get("pngs_native_b64"))
+    if not blobs:
+        blobs = _as_png_list(result.get("pngs"))
+    if not blobs:
+        blobs = _decode_png_b64_list(result.get("pngs_b64"))
+    native: list[bytes] = []
+    for blob in blobs:
+        if _png_ihdr_size(blob) != (NATIVE_WIDTH, NATIVE_HEIGHT):
+            continue
+        native.append(blob)
+        if len(native) >= MAX_SCREENSHOT_ALL:
+            break
+    return native
+
+
+def _screenshot_entries(pngs: list[bytes]) -> list[dict[str, Any]]:
+    return [
+        {
+            "png_base64": base64.b64encode(blob).decode("ascii"),
+            "width": NATIVE_WIDTH,
+            "height": NATIVE_HEIGHT,
+            "scale": 1,
+        }
+        for blob in pngs
+    ]
+
+
+def format_play_tool_result(
+    result: dict[str, Any],
+    *,
+    want_video: bool = False,
+) -> list[dict[str, Any] | Image] | dict[str, Any]:
+    """Shape an engine send_input dict into the MCP play return.
+
+    Public JSON gets native 160x144 ``screenshots``. The optional MCP Image is
+    the last scaled preview (or GIF). Internal hashes / paths stay stripped.
+    """
+    pngs = _as_png_list(result.get("pngs"))
+    gif = result.get("gif")
+    native = _native_pngs(result)
+    result.pop("pngs", None)
+    result.pop("gif", None)
+    result.pop("gifs", None)
+    result.pop("gif_b64", None)
+    result.pop("pngs_b64", None)
+    result.pop("pngs_native", None)
+    result.pop("pngs_native_b64", None)
+    status = _public(result)
+    if status.get("ok") and native:
+        status["screenshots"] = _screenshot_entries(native)
+    if not result.get("sent") and result.get("error"):
+        status.pop("screenshots", None)
+        return status
+
+    image: Image | None = None
+    if want_video and isinstance(gif, (bytes, bytearray)) and gif:
+        image = Image(data=bytes(gif), format="gif")
+    elif pngs:
+        image = Image(data=pngs[-1], format="png")
+    if image is None:
+        return status
+    return [status, image]
 
 
 def _unplayable_boot_error(reason: str) -> str:
@@ -160,6 +275,7 @@ def play(
     steps: list[dict[str, Any]] | None = None,
     until: str | None = None,
     media: str | None = None,
+    screenshot_mode: str | None = None,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
     bound = require_email()
     if isinstance(bound, dict):
@@ -186,6 +302,11 @@ def play(
     try:
         args = parse_play_args(raw)
         play_input = play_input_from_args(args)
+        if screenshot_mode is not None:
+            play_input = replace(
+                play_input,
+                screenshot_mode=parse_screenshot_mode(screenshot_mode),
+            )
     except ValueError as exc:
         return _public(
             {
@@ -214,24 +335,8 @@ def play(
             }
         )
 
-    pngs = result.pop("pngs", []) or []
-    gif = result.pop("gif", None)
-    result.pop("gifs", None)
-    result.pop("gif_b64", None)
-    result.pop("pngs_b64", None)
-    status = _public(result)
-    if not result.get("sent") and result.get("error"):
-        return status
-
-    want_video = args.media == "video" or bool(gif)
-    image: Image | None = None
-    if want_video and isinstance(gif, (bytes, bytearray)) and gif:
-        image = Image(data=bytes(gif), format="gif")
-    elif pngs:
-        image = Image(data=pngs[-1], format="png")
-    if image is None:
-        return status
-    return [status, image]
+    want_video = args.media == "video" or bool(result.get("gif"))
+    return format_play_tool_result(result, want_video=want_video)
 
 
 def save() -> dict[str, Any]:

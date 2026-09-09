@@ -482,6 +482,10 @@ def test_public_shaping_of_play_dict_does_not_leak_hashes() -> None:
     assert public["game"] == "TETRIS"
     assert "looks_like" not in public
     assert set(public) <= PUBLIC_STATUS_KEYS
+    assert "screenshots" not in public
+    assert "region_hashes" not in public
+    assert "rom_path" not in public
+    assert "idle_timeout_seconds" not in public
     for path in _flatten_keys(public):
         joined = path.lower()
         assert "hash" not in joined

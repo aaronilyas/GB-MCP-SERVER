@@ -583,9 +583,15 @@ class ScreenshotPlan:
         regions = getattr(play, "hash_regions", None) or dict(DEFAULT_HASH_REGIONS)
         selected, subsampled = self._select(mode)
         pngs: list[bytes] = []
+        pngs_native: list[bytes] = []
         screenshots: list[dict[str, Any]] = []
         for shot, kind in selected:
-            pngs.append(encode_png(scale_nearest(shot.frame, scale)))
+            native_png = encode_png(scale_nearest(shot.frame, 1))
+            pngs_native.append(native_png)
+            if scale == 1:
+                pngs.append(native_png)
+            else:
+                pngs.append(encode_png(scale_nearest(shot.frame, scale)))
             entry: dict[str, Any] = {"kind": kind, "frame_index": shot.frame_index}
             if shot.step_index is not None:
                 entry["step_index"] = shot.step_index
@@ -604,6 +610,7 @@ class ScreenshotPlan:
             flags = classify(final_native)
         return {
             "pngs": pngs,
+            "pngs_native": pngs_native,
             "screenshots": screenshots,
             "screenshot_count": len(pngs),
             "screenshots_subsampled": subsampled,

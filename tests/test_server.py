@@ -12,10 +12,12 @@ from mcp.server.mcpserver.utilities.types import Image
 import db
 import server
 from gb_mcp import config
+from gb_mcp.emulator.loop import PUBLIC_STATUS_KEYS
 from gb_mcp.emulator.play_limits import FORBIDDEN_RESPONSE_KEY_NEEDLES
 from gb_mcp.http import oauth_token_claims
 from gb_mcp.storage.roms import _state_path_for_rom
 from gb_mcp.tools import ingest as ingest_mod
+from gb_mcp.tools import play as play_tools
 
 from rom_builder import make_rom
 
@@ -48,6 +50,20 @@ def _unwrap_input(result: dict[str, Any] | list[Any]) -> tuple[dict[str, Any], l
         assert isinstance(item, Image)
         images.append(item)
     return status, images
+
+
+def _assert_native_screenshot(entry: dict[str, Any]) -> None:
+    assert set(entry) == {"png_base64", "width", "height", "scale"}
+    assert entry["width"] == 160
+    assert entry["height"] == 144
+    assert entry["scale"] == 1
+    raw = entry["png_base64"]
+    assert isinstance(raw, str)
+    assert not raw.startswith("data:")
+    blob = base64.b64decode(raw)
+    assert blob.startswith(PNG_MAGIC)
+    image = PILImage.open(io.BytesIO(blob))
+    assert image.size == (160, 144)
 
 
 @pytest.fixture
@@ -216,6 +232,8 @@ def test_list_games_and_boot_play_stop(
         assert "email" not in status
         assert "region_hashes" not in status
         assert "native_size" not in status
+        assert len(status["screenshots"]) == 1
+        _assert_native_screenshot(status["screenshots"][0])
         assert len(images) == 1
         assert images[0].data is not None
         assert images[0].data.startswith(PNG_MAGIC)
@@ -240,6 +258,8 @@ def test_play_after_boot_needs_no_email_or_id(
         status, images = _unwrap_input(server.play(buttons=["a"]))
     assert status["ok"] is True
     assert images
+    assert len(status["screenshots"]) == 1
+    _assert_native_screenshot(status["screenshots"][0])
 
 
 def test_boot_unknown_title(isolated_db, roms_dir: Path, pyboy_manager) -> None:
@@ -269,6 +289,8 @@ def test_play_without_session(isolated_db, roms_dir: Path, pyboy_manager) -> Non
         result, images = _unwrap_input(server.play(buttons=["a"]))
     assert result["ok"] is False
     assert images == []
+    assert "screenshots" not in result
+    assert not result.get("screenshots")
 
 
 def test_play_wait_empty_buttons(isolated_db, roms_dir: Path, pyboy_manager) -> None:
@@ -290,6 +312,7 @@ def test_play_rejects_buttons_and_steps(
     status, images = _unwrap_input(result)
     assert status["ok"] is False
     assert images == []
+    assert "screenshots" not in status
     assert "not both" in status["error"]
 
 
@@ -354,7 +377,9 @@ def test_public_play_status_does_not_leak(
     with _as_owner():
         server.boot(title="TETRIS")
         status, images = _unwrap_input(server.play(buttons=["a"], frames=8))
-    assert set(status) <= {"ok", "frames", "stopped", "game", "looks_like", "error"}
+    assert set(status) <= PUBLIC_STATUS_KEYS
+    for leaked in ("region_hashes", "wram", "rom_path", "idle_timeout_seconds"):
+        assert leaked not in status
     joined = " ".join(status.keys()).lower()
     for needle in FORBIDDEN_RESPONSE_KEY_NEEDLES:
         assert needle not in joined
@@ -363,6 +388,70 @@ def test_public_play_status_does_not_leak(
     assert blob is not None
     image = PILImage.open(io.BytesIO(blob))
     assert image.size == (640, 576)
+    assert len(status["screenshots"]) == 1
+    _assert_native_screenshot(status["screenshots"][0])
+
+
+def test_play_status_json_contains_native_png(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    _mapped_rom(roms_dir)
+    with _as_owner():
+        server.boot(title="TETRIS")
+        result = server.play(buttons=["a"], frames=1)
+    status, images = _unwrap_input(result)
+    assert isinstance(result, list)
+    assert status["ok"] is True
+    assert len(images) == 1
+    preview = PILImage.open(io.BytesIO(images[0].data))
+    assert preview.size == (640, 576)
+    assert len(status["screenshots"]) == 1
+    _assert_native_screenshot(status["screenshots"][0])
+    json_png = base64.b64decode(status["screenshots"][0]["png_base64"])
+    assert json_png != images[0].data
+
+
+def test_format_play_tool_result_error_omits_screenshot_bytes() -> None:
+    buf = io.BytesIO()
+    PILImage.new("RGB", (160, 144), color=(1, 2, 3)).save(buf, format="PNG")
+    native = buf.getvalue()
+    status, images = _unwrap_input(
+        play_tools.format_play_tool_result(
+            {
+                "sent": False,
+                "error": "stopped",
+                "running": False,
+                "pngs_native": [native],
+                "pngs": [native],
+            }
+        )
+    )
+    assert status["ok"] is False
+    assert "screenshots" not in status
+    assert images == []
+
+
+def test_play_screenshot_mode_all_two_steps_one_preview(
+    isolated_db, roms_dir: Path, pyboy_manager
+) -> None:
+    _mapped_rom(roms_dir)
+    with _as_owner():
+        server.boot(title="TETRIS")
+        result = play_tools.play(
+            steps=[{"buttons": ["a"]}, {"buttons": ["b"]}],
+            screenshot_mode="all",
+        )
+    status, images = _unwrap_input(result)
+    assert status["ok"] is True
+    assert len(status["screenshots"]) == 2
+    blobs = []
+    for entry in status["screenshots"]:
+        _assert_native_screenshot(entry)
+        blobs.append(base64.b64decode(entry["png_base64"]))
+    assert blobs[0] != blobs[1]
+    assert len(images) == 1
+    preview = PILImage.open(io.BytesIO(images[0].data))
+    assert preview.size == (640, 576)
 
 
 def test_add_rom_header_only_pokemon_rejected(

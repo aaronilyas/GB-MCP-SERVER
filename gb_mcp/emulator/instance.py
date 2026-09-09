@@ -136,6 +136,16 @@ class DockerInstanceBackend:
             except Exception as exc:  # noqa: BLE001
                 raise RuntimeError("Play instance returned an invalid screenshot") from exc
         remote["pngs"] = pngs
+        pngs_native_b64 = remote.pop("pngs_native_b64", [])
+        pngs_native: list[bytes] = []
+        if isinstance(pngs_native_b64, list):
+            for item in pngs_native_b64:
+                try:
+                    pngs_native.append(base64.b64decode(item))
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError("Play instance returned an invalid screenshot") from exc
+        if pngs_native:
+            remote["pngs_native"] = pngs_native
         gif_b64 = remote.pop("gif_b64", None)
         if isinstance(gif_b64, str) and gif_b64:
             try:

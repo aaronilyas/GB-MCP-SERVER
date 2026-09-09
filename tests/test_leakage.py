@@ -148,6 +148,7 @@ def _dirty_internal_status() -> dict:
         "ocr_error": None,
         "hash": "deadbeef",
         "blake2s": "cafebabe",
+        "wram": b"nope",
         "battle_likely": True,
         "textbox_likely": True,
         "start_menu_likely": True,
@@ -159,6 +160,11 @@ def test_shape_public_status_drops_internal_fields() -> None:
     public = shape_public_status(_dirty_internal_status())
     for key in PUBLIC_STRIPPED_KEYS:
         assert key not in public
+    assert "screenshots" not in public
+    assert "region_hashes" not in public
+    assert "wram" not in public
+    assert "rom_path" not in public
+    assert "idle_timeout_seconds" not in public
     assert set(public) <= PUBLIC_STATUS_KEYS
     assert public["ok"] is True
     assert public["frames"] == 8

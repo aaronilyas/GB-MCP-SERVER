@@ -135,6 +135,23 @@ def test_short_tap_stays_png_only() -> None:
     assert wants_action_gif(type("P", (), {"macro": "buttons", "planned_frames": 1, "max_frames": 1})()) is False
 
 
+def test_instance_server_forwards_all_native_pngs() -> None:
+    module = _instance_server()
+    natives = [_png((i, 0, 80), size=(160, 144)) for i in range(3)]
+    scaled = [_png((i, 0, 80), size=(640, 576)) for i in range(3)]
+    encoded = module.encode_input_media(
+        {"pngs": scaled, "pngs_native": natives, "sent": True}
+    )
+    assert "pngs" not in encoded
+    assert "pngs_native" not in encoded
+    assert len(encoded["pngs_b64"]) == 1
+    assert len(encoded["pngs_native_b64"]) == 3
+    decoded = [base64.b64decode(item) for item in encoded["pngs_native_b64"]]
+    assert decoded == natives
+    preview = PILImage.open(io.BytesIO(base64.b64decode(encoded["pngs_b64"][0])))
+    assert preview.size == (640, 576)
+
+
 def test_instance_server_encodes_at_most_one_png_and_gif() -> None:
     module = _instance_server()
     frames = [_png((i, 0, 80)) for i in range(30)]

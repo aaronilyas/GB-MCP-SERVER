@@ -164,11 +164,19 @@ def _apply_action_media(
     if sampled_internally:
         result["screenshot_mode"] = public_screenshot_mode or "final"
         result["screenshots_subsampled"] = False
+    collapse = bool(gif or sampled_internally)
     shots = result.get("screenshots")
-    if isinstance(shots, list) and shots and (gif or sampled_internally):
+    if isinstance(shots, list) and shots and collapse:
         last = dict(shots[-1])
         last["kind"] = "final"
         result["screenshots"] = [last]
+    native = result.get("pngs_native")
+    if collapse and isinstance(native, list) and native:
+        last_native = native[-1]
+        if isinstance(last_native, (bytes, bytearray)) and last_native:
+            result["pngs_native"] = [bytes(last_native)]
+        else:
+            result["pngs_native"] = native[-1:]
 
 
 def _gif_frame_duration_ms(frame_count: int) -> int:

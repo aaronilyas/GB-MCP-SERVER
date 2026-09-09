@@ -113,8 +113,10 @@ FORBIDDEN_RESPONSE_KEY_NEEDLES = (
 )
 
 # Allowlisted JSON keys on a successful send_pyboy_input status dict.
-# Images travel beside this dict as MCP Image objects, not as these keys.
-# `pngs` is an in-process list of PNG bytes popped before the MCP return.
+# Scaled preview images travel beside the public play dict as MCP Image objects.
+# Native 160x144 PNGs travel in-process as `pngs_native` (bytes) / Docker
+# `pngs_native_b64`, and on the public play status as `screenshots[].png_base64`.
+# `pngs` is the scaled preview list; the MCP host keeps the last frame as Image.
 SEND_INPUT_RESPONSE_KEYS = frozenset(
     {
         "email",
@@ -137,6 +139,8 @@ SEND_INPUT_RESPONSE_KEYS = frozenset(
         "screenshots",
         "screenshots_subsampled",
         "pngs",
+        "pngs_native",
+        "pngs_native_b64",
         "stop_reason",
         "frames_advanced",
         "emulation_speed",
