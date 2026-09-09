@@ -118,6 +118,21 @@ def test_public_catalog_is_six_tools() -> None:
         assert old not in names
 
 
+def test_email_arg_only_on_list_boot_add_rom() -> None:
+    tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
+    assert set(tools) == set(_PUBLIC_TOOL_NAMES)
+    assert len(tools) == 6
+    blob = " ".join((tool.description or "") for tool in tools.values()).lower()
+    for needle in _FORBIDDEN_DESCRIPTION:
+        assert needle not in blob, needle
+    for name in ("list_games", "boot", "add_rom"):
+        schema = tools[name].parameters or {}
+        assert "email" in schema.get("properties", {})
+        assert "email" not in (schema.get("required") or [])
+    for name in ("play", "save", "stop"):
+        assert "email" not in tools[name].parameters.get("properties", {})
+
+
 def test_instructions_match_how_to_play() -> None:
     assert server.mcp.instructions == server.HOW_TO_PLAY
     assert server.how_to_play_resource() == server.HOW_TO_PLAY
@@ -350,6 +365,26 @@ def test_non_email_sub_claim_is_not_session_identity() -> None:
     with oauth_token_claims({"sub": "gb-mcp-user"}):
         result = server.list_games()
     assert "model_request" in result
+
+
+def test_explicit_email_overrides_oauth_token_claims(isolated_db, roms_dir: Path) -> None:
+    name = _mapped_rom(roms_dir, email="owner@example.com")
+    with oauth_token_claims({"email": "token@example.com"}):
+        listed_token = server.list_games()
+        listed_owner = server.list_games(email="owner@example.com")
+    assert listed_token.get("games") == []
+    assert "model_request" not in listed_token
+    assert listed_owner["games"][0]["id"] == name
+    assert "model_request" not in listed_owner
+    assert "email" not in listed_owner
+
+
+def test_list_explicit_email_without_token_identity(isolated_db, roms_dir: Path) -> None:
+    name = _mapped_rom(roms_dir, email="owner@example.com")
+    result = server.list_games(email="Owner@Example.com")
+    assert result["games"][0]["id"] == name
+    assert "model_request" not in result
+    assert "email" not in result
 
 
 def test_boot_truncated_rom_does_not_start_session(
