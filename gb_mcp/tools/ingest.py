@@ -124,7 +124,9 @@ def persist_mapped_rom(
     }
 
 
-def add_rom(rom_base64: str, filename: str = "rom.gb") -> dict[str, Any]:
+def add_rom(
+    rom_base64: str, filename: str = "rom.gb", email: str | None = None
+) -> dict[str, Any]:
     """Validate a small homebrew ROM and map it from the current identity."""
     if len(rom_base64) > config.MAX_ROM_B64_CHARS:
         return {
@@ -168,7 +170,7 @@ def add_rom(rom_base64: str, filename: str = "rom.gb") -> dict[str, Any]:
             "error": f"ROM exceeds maximum size of {config.MAX_ROM_BYTES} bytes",
         }
 
-    bound = require_email()
+    bound = require_email(explicit=email)
     if isinstance(bound, dict):
         return bound
 
@@ -189,6 +191,7 @@ def add_rom(rom_base64: str, filename: str = "rom.gb") -> dict[str, Any]:
         return rejected
     result = persist_mapped_rom(rom_bytes=rom_bytes, filename=filename, email=bound)
     result.pop("path", None)
+    result.pop("email", None)
     return result
 
 
