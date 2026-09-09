@@ -14,8 +14,9 @@ Tools: list_games, boot, play, save, stop, add_rom.
 list_games lists your titles.
 boot starts a session by title or id. Default restores the last snapshot.
 reset=true cold-boots and drops the snapshot.
-After boot, play is the controller: buttons plus optional frames, gap, mash, steps, until, media.
-play takes no email or subdirectory.
+list_games, boot, and add_rom take optional email. Consent or token email also binds; explicit email wins.
+If unbound, they ask for email — do not invent one. After boot, play / save / stop take no email.
+play is the controller: buttons plus optional frames, gap, mash, steps, until, media.
 Each play returns one PNG (4×) or one short GIF. Look at it, then play again.
 until vocab: battle | textbox | menu | stable | fade.
 One live session per user.
