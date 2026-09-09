@@ -47,6 +47,7 @@ from mcp.shared.auth import (
 )
 from mcp.shared.auth_utils import check_resource_allowed
 
+import db
 from gb_mcp import config
 
 MCP_SCOPE = "mcp"
@@ -67,11 +68,13 @@ _REGISTRATION_OPTIONS = ClientRegistrationOptions(
 
 class IssuedAuthorizationCode(AuthorizationCode):
     issuer: str | None = None
+    email: str | None = None
 
 
 class IssuedRefreshToken(RefreshToken):
     resource: str | None = None
     issuer: str | None = None
+    email: str | None = None
 
 
 @dataclass
@@ -168,12 +171,13 @@ class GbMcpOAuthProvider(
             stored = self._codes.pop(authorization_code.code, None)
             if stored is None or stored.client_id != client.client_id:
                 raise TokenError(error="invalid_grant", error_description="authorization code does not exist")
+            email = _require_email_identity(stored.email, stored.subject)
             return self._issue_tokens_locked(
                 client_id=client.client_id,
                 scopes=stored.scopes,
                 resource=stored.resource,
                 issuer=stored.issuer,
-                subject=stored.subject or "gb-mcp-user",
+                email=email,
             )
 
     async def load_refresh_token(
@@ -195,12 +199,13 @@ class GbMcpOAuthProvider(
             stored = self._refresh.pop(refresh_token.token, None)
             if stored is None or stored.client_id != client.client_id:
                 raise TokenError(error="invalid_grant", error_description="refresh token does not exist")
+            email = _require_email_identity(stored.email, stored.subject)
             return self._issue_tokens_locked(
                 client_id=client.client_id,
                 scopes=scopes,
                 resource=stored.resource,
                 issuer=stored.issuer,
-                subject=stored.subject or "gb-mcp-user",
+                email=email,
             )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -231,7 +236,7 @@ class GbMcpOAuthProvider(
         scopes: list[str],
         resource: str | None,
         issuer: str | None,
-        subject: str,
+        email: str,
     ) -> OAuthToken:
         now = int(time.time())
         secret = config.token_signing_secret()
@@ -247,7 +252,8 @@ class GbMcpOAuthProvider(
                 "exp": now + _ACCESS_TTL_SECONDS,
                 "iat": now,
                 "nbf": now,
-                "sub": subject,
+                "sub": email,
+                "email": email,
                 "scope": " ".join(granted),
                 "client_id": client_id,
                 "jti": secrets.token_urlsafe(16),
@@ -261,7 +267,8 @@ class GbMcpOAuthProvider(
             client_id=client_id,
             scopes=granted,
             expires_at=now + _REFRESH_TTL_SECONDS,
-            subject=subject,
+            subject=email,
+            email=email,
             resource=resource,
             issuer=issuer,
         )
@@ -506,6 +513,16 @@ async def _complete_consent(provider: GbMcpOAuthProvider, form: Any, consent_tok
             error_description="The resource owner denied the request",
             state=pending.state,
         )
+    raw_email = _string_param(form, "email")
+    try:
+        email = db.normalize_email(raw_email or "")
+    except ValueError:
+        return await _redisplay_consent(
+            provider,
+            pending,
+            error="Enter a valid email address.",
+            email=raw_email,
+        )
     code = secrets.token_urlsafe(32)
     provider.store_code(
         IssuedAuthorizationCode(
@@ -517,13 +534,38 @@ async def _complete_consent(provider: GbMcpOAuthProvider, form: Any, consent_tok
             redirect_uri=AnyUrl(pending.redirect_uri),
             redirect_uri_provided_explicitly=pending.redirect_uri_provided_explicitly,
             resource=pending.resource,
-            subject="gb-mcp-user",
+            subject=email,
+            email=email,
             issuer=pending.issuer,
         )
     )
     return RedirectResponse(
         url=construct_redirect_uri(pending.redirect_uri, code=code, state=pending.state),
         status_code=302,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _redisplay_consent(
+    provider: GbMcpOAuthProvider,
+    pending: _PendingConsent,
+    *,
+    error: str,
+    email: str | None,
+) -> Response:
+    client = await provider.get_client(pending.client_id)
+    if client is None:
+        return _json_authorize_error("invalid_request", "consent request is invalid or expired")
+    consent_token = provider.store_pending(pending)
+    return HTMLResponse(
+        _consent_page(
+            client=client,
+            resource=pending.resource,
+            redirect_uri=pending.redirect_uri,
+            consent_token=consent_token,
+            error=error,
+            email=email,
+        ),
         headers={"Cache-Control": "no-store"},
     )
 
@@ -633,11 +675,15 @@ def _consent_page(
     resource: str,
     redirect_uri: str,
     consent_token: str,
+    error: str | None = None,
+    email: str | None = None,
 ) -> str:
     client_name = html.escape(client.client_name or client.client_id)
     resource_h = html.escape(resource)
     redirect_h = html.escape(redirect_uri)
     token_h = html.escape(consent_token)
+    email_h = html.escape(email or "")
+    error_html = f'<p class="error">{html.escape(error)}</p>' if error else ""
     parsed = urlparse(redirect_uri)
     callback_host = html.escape(parsed.netloc or parsed.path)
     return f"""<!DOCTYPE html>
@@ -652,6 +698,9 @@ def _consent_page(
     h1 {{ font-size: 1.25rem; margin: 0 0 0.75rem; }}
     p {{ line-height: 1.45; }}
     code {{ word-break: break-all; }}
+    label {{ display: block; margin-top: 1rem; }}
+    input[type="email"] {{ font: inherit; width: 100%; margin-top: 0.35rem; padding: 0.45rem 0.5rem; box-sizing: border-box; }}
+    .error {{ color: #b00020; }}
     .actions {{ display: flex; gap: 0.75rem; margin-top: 1.25rem; }}
     button {{ font: inherit; padding: 0.5rem 1rem; cursor: pointer; }}
     button[value="allow"] {{ background: #0b57d0; color: #fff; border: 0; border-radius: 4px; }}
@@ -664,18 +713,29 @@ def _consent_page(
     <p><strong>{client_name}</strong> wants to connect to the Game Boy MCP resource.</p>
     <p>Resource: <code>{resource_h}</code></p>
     <p>After you allow, the browser returns to <code>{callback_host}</code> (<code>{redirect_h}</code>).</p>
-    <p>You do not need a bearer token, password, or API key. Email used by tools is separate from this consent.</p>
+    <p>You do not need a bearer token, password, or API key. The email you enter becomes the identity on the access token used by tools.</p>
+    {error_html}
     <form method="post" action="/authorize">
       <input type="hidden" name="consent_token" value="{token_h}">
+      <label for="email">Email
+        <input type="email" id="email" name="email" value="{email_h}" autocomplete="email" required>
+      </label>
       <div class="actions">
         <button type="submit" name="consent" value="allow">Allow</button>
-        <button type="submit" name="consent" value="deny">Deny</button>
+        <button type="submit" name="consent" value="deny" formnovalidate>Deny</button>
       </div>
     </form>
   </main>
 </body>
 </html>
 """
+
+
+def _require_email_identity(email: str | None, subject: str | None) -> str:
+    try:
+        return db.normalize_email(email or subject or "")
+    except ValueError as exc:
+        raise TokenError(error="invalid_grant", error_description="grant has no email identity") from exc
 
 
 def _string_param(params: Any, key: str) -> str | None:
