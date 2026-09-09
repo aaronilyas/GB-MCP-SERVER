@@ -349,6 +349,7 @@ def test_list_binds_email_from_oauth_email_claim(isolated_db, roms_dir: Path) ->
     name = _mapped_rom(roms_dir, email="owner@example.com")
     with oauth_token_claims({"email": "Owner@Example.com", "sub": "other@example.com"}):
         result = server.list_games()
+    assert result["ok"] is True
     assert result["games"][0]["id"] == name
     assert "model_request" not in result
     assert "email" not in result

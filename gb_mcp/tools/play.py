@@ -170,7 +170,9 @@ def list_games(email: str | None = None) -> dict[str, Any]:
     if isinstance(bound, dict):
         return bound
     expire_uploads()
-    return catalog_list_games(bound)
+    result = catalog_list_games(bound)
+    result["ok"] = True
+    return result
 
 
 def boot(

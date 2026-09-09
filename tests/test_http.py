@@ -208,6 +208,7 @@ def test_list_games_explicit_email_with_static_bearer(
     content = called_msg["result"]["content"]
     text = "".join(part.get("text", "") for part in content if part.get("type") == "text")
     payload = json.loads(text)
+    assert payload["ok"] is True
     assert payload["games"][0]["id"] == name
     assert payload["games"][0]["title"] == "TETRIS"
     assert "model_request" not in payload

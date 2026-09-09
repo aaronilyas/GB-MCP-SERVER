@@ -695,6 +695,7 @@ def test_consent_allow_with_email_issues_binding_token(
         arguments={},
     )
     assert "model_request" not in payload
+    assert payload["ok"] is True
     assert payload["games"][0]["id"] == name
     assert "email" not in payload
 
