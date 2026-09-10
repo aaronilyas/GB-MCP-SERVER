@@ -384,11 +384,6 @@ def _command_pane_likely(rgb: np.ndarray) -> bool:
     return _command_pane_rect(rgb) is not None
 
 
-def _fight_menu_pane_likely(rgb: np.ndarray) -> bool:
-    """Light command box — typically bottom-right on turn-based combat HUDs."""
-    return _command_pane_likely(rgb)
-
-
 def _tilemap_field_likely(rgb: np.ndarray) -> bool:
     """Repeating 8×8-ish playfield with no command pane and no dual status bars."""
     if _command_pane_likely(rgb):
@@ -626,43 +621,6 @@ def command_pane_cursor_cell(frame: Any) -> str | None:
     if best_score < 0.12:
         return None
     return best_name
-
-
-def fight_menu_visible(frame: Any) -> bool:
-    rgb = _as_rgb(frame)
-    return _battle_likely(rgb) and _command_pane_likely(rgb)
-
-
-_LEGACY_CURSOR_CELLS: tuple[tuple[str, int, int, int, int], ...] = (
-    ("fight", 88, 104, 36, 20),
-    ("pkmn", 124, 104, 36, 20),
-    ("item", 88, 124, 36, 20),
-    ("run", 124, 124, 36, 20),
-)
-
-
-def fight_cursor_cell(frame: Any) -> str | None:
-    """Compatibility: detect a dark cursor in a 2×2 command pane when present."""
-    rgb = _as_rgb(frame)
-    lum = _luminance(rgb)
-    # Prefer fixed bands used by common bottom-right 2×2 combat panes.
-    best_name: str | None = None
-    best_score = 0.0
-    for name, x, y, _w, h in _LEGACY_CURSOR_CELLS:
-        cell = lum[y : y + h, x : x + 12]
-        if cell.size == 0:
-            continue
-        dark = cell < 70.0
-        score = float(dark.mean())
-        if 0.08 <= score <= 0.70 and score > best_score:
-            best_score = score
-            best_name = name
-    if best_score >= 0.12:
-        return best_name
-    cell = command_pane_cursor_cell(rgb)
-    if cell is None:
-        return None
-    return {"tl": "fight", "tr": "pkmn", "bl": "item", "br": "run"}.get(cell)
 
 
 def _menu_pane_likely(pane: np.ndarray, rest: np.ndarray) -> bool:
