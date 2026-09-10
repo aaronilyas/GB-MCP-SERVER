@@ -62,7 +62,7 @@ def _battle() -> np.ndarray:
 
 
 def _overworld_field() -> np.ndarray:
-    """Pallet-like grass with an 8×8 checker, tree belt, path, and a house."""
+    """Textured overworld grass with an 8×8 checker, tree belt, path, and a house."""
     frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
     light = (88, 168, 72)
     dark = (56, 136, 56)
@@ -684,7 +684,9 @@ def test_intent_advance_text_noop_without_box() -> None:
     pyboy.frame_factory = lambda _ticks, _pressed: PILImage.fromarray(field)
     play = play_input_from_args(parse_play_args({"intent": "advance_text"}))
     result = execute_play_command(pyboy, play)
-    assert result["frames_advanced"] <= 16
+    # Waits up to ~90 frames for a box to appear before giving up.
+    assert result["frames_advanced"] <= 90
+    assert result["frames_advanced"] >= 8
 
 
 def test_intent_advance_text_returns_one_gif() -> None:
@@ -722,3 +724,49 @@ def test_intent_run_away_returns_immediately_outside_battle() -> None:
     assert result["frames_advanced"] <= 16
     classifiers = result.get("classifiers") or {}
     assert classifiers.get("battle_likely") is not True
+
+
+def test_intent_battle_turn_acts_on_hud() -> None:
+    """battle_turn must press A on a combat HUD — not brief-wait no-op."""
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    battle = _battle()
+    field = _overworld_field()
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        if ticks < 40:
+            return PILImage.fromarray(battle)
+        return PILImage.fromarray(field)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(parse_play_args({"intent": "battle_turn"}))
+    result = execute_play_command(pyboy, play)
+    assert result["frames_advanced"] > 16
+    assert pyboy.presses.count("a") >= 1
+
+
+def test_intent_skip_intro_stops_when_start_menu_appears() -> None:
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    logo = _solid((180, 180, 180))
+    menu_frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+    menu_frame[:, :] = (80, 160, 80)
+    menu_frame[:, 80:, :] = (248, 248, 248)
+    seen_start = {"n": 0}
+
+    def factory(_ticks: int, pressed: set[str]) -> PILImage.Image:
+        if "start" in pressed or seen_start["n"] > 0:
+            seen_start["n"] += 1
+        if seen_start["n"] >= 2:
+            return PILImage.fromarray(menu_frame)
+        return PILImage.fromarray(logo)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(parse_play_args({"intent": "skip_intro"}))
+    result = execute_play_command(pyboy, play)
+    assert result["frames_advanced"] < 600
+    assert pyboy.presses.count("start") >= 1
+    classifiers = result.get("classifiers") or {}
+    assert classifiers.get("start_menu_likely") is True

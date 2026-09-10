@@ -72,10 +72,14 @@ PUBLIC_STOPPED_REASONS = frozenset(
         "timeout",
     }
 )
-PUBLIC_INTENTS = frozenset({"advance_text", "run_away", "battle_turn"})
+PUBLIC_INTENTS = frozenset(
+    {"advance_text", "run_away", "battle_turn", "skip_intro", "enter_door"}
+)
 PUBLIC_KEYFRAME_MIN_FRAMES = 24
 # Mash / directional hold at or above this many planned frames pack a looping GIF.
 LONG_ACTION_FRAMES = 30
+# Public single D-pad with frames omitted: walk hold (not a one-tile tap).
+PUBLIC_DPAD_HOLD_FRAMES = 240
 
 # Defaults (breaking vs the previous 1x / 5-minute / native-PNG path).
 DEFAULT_EMULATION_SPEED = 0  # uncapped; pyboy.set_emulation_speed(0)
@@ -91,7 +95,7 @@ DEFAULT_HOLD_ABORT_LUMA_JUMP = 80.0
 DEFAULT_MASH_BUTTON = "a"
 DEFAULT_MASH_PRESS_FRAMES = 4
 DEFAULT_MASH_RELEASE_FRAMES = 4
-# Public PlayArgs mash only (Gen 1 typewriter skip). Engine PlayInput stays 4/4.
+# Public PlayArgs mash only (dialogue typewriter skip). Engine PlayInput stays 4/4.
 PUBLIC_MASH_PRESS_FRAMES = 12
 PUBLIC_MASH_RELEASE_FRAMES = 8
 DEFAULT_GAP_FRAMES = 0
@@ -115,10 +119,12 @@ BLOCKED_CELL_TOLERANCE = 20
 # Mean |RGB| of 8×8 cells. Walk-cycle bob is ~1.1; 1px camera scroll on textured
 # overworld is ~3.3. Stuck if consecutive evals stay at or below this.
 BLOCKED_COARSE_L1 = 2.5
-# Facing turn is ~8–16 frames; skip blocked until this many evals have a previous frame.
-BLOCKED_TURN_GRACE_EVALS = 3
+# Facing turn is ~8–16 frames. With default until_eval_interval=4, four evals ≈ 16 frames.
+BLOCKED_TURN_GRACE_EVALS = 4
 # Released ticks after public mash aborts so the next A does not re-talk.
 PUBLIC_MASH_ABORT_GAP_FRAMES = 12
+# Luminance std below this ≈ solid fade / black / white (not a stable room).
+UNIFORM_LUMA_STD_MAX = 6.0
 
 # Command wait is slightly above the engine wall-clock so the engine can
 # return stop_reason=call_timeout instead of raising TimeoutError.

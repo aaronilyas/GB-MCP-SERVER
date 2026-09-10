@@ -29,6 +29,7 @@ from gb_mcp.emulator.play_limits import (
     NATIVE_WIDTH,
     PLAYER_BLOCKED_REGION,
     SCREENSHOT_SCALES,
+    UNIFORM_LUMA_STD_MAX,
 )
 
 # Channel delta ignored as encoder/LCD noise when comparing frames.
@@ -37,34 +38,45 @@ _KEYFRAME_FRACS = (0.25, 0.50, 0.75, 1.0)
 _PNG_FORMAT = "PNG"
 
 # Classifier thresholds are coarse (synthetic 160x144 fixtures, not ROM dumps).
-_TEXTBOX_Y0 = 96
-_TEXTBOX_BORDER_MAX = 80.0
-_TEXTBOX_INNER_MIN = 180.0
-_TEXTBOX_CONTRAST_MIN = 80.0
+# Dialogue / prompt: framed light window (bottom third or lower-center overlay).
+_TEXTBOX_BOTTOM_Y0 = 88
+_TEXTBOX_BORDER_MAX = 90.0
+_TEXTBOX_INNER_MIN = 130.0  # typewriter-partial lines still count
+_TEXTBOX_CONTRAST_MIN = 50.0
 _BATTLE_SPLIT_MIN = 25.0
 _BAR_ROW_LUM_MIN = 190.0
-# Contiguous HP-bar run length in native pixels (Gen 1 bar track ~48px).
-# Row-mean fraction matched Pallet pavement and house-window rows.
+# Contiguous status-bar run length in native pixels (many RPGs use ~40–100px tracks).
 _BAR_MIN_RUN = 40
 _BAR_MAX_RUN = 112
 _BAR_THICKNESS = (2, 10)
 _MENU_LIGHT_MIN = 200.0
-# Tall near-white pane (Start menu), not a brick facade or house wall.
-_MENU_LIGHT_FRAC = 0.65
+# Tall near-white UI pane (pause / inventory), not a brick facade or house wall.
+_MENU_LIGHT_FRAC = 0.70
 _MENU_HEIGHT_FRAC = 0.75
-_MENU_ROW_LIGHT_FRAC = 0.60
-# Pallet Start (right pane) vs overworld is ~26 lum; overworld halves differ ~7.
-_MENU_PANE_DELTA = 20.0
+_MENU_ROW_LIGHT_FRAC = 0.65
+# Pane must clearly out-luma the rest (textured walls stay below this).
+_MENU_PANE_DELTA = 24.0
 
-# Stale GB window: a large near-black rectangle while the rest still looks like a room.
-# Furniture / dark rugs are dimmer brown, not this near-black.
+
+# Stale GB window / warp slab: large near-black rectangle; rugs are dimmer brown.
 _OCCLUDE_BLACK_LUM = 12.0
 _OCCLUDE_FILL_FRAC = 0.90
 _OCCLUDE_MIN_AREA_FRAC = 0.25
 _OCCLUDE_FADE_FRAC = 0.88
 _OCCLUDE_ROOM_STD_MIN = 6.0
 _OCCLUDE_ROOM_BLACK_MAX = 0.40
+# Gate expensive near-black rect search unless black grew or mean luma dropped.
+_OCCLUDE_LUMA_DROP = 8.0
+_OCCLUDE_BLACK_FRAC_RISE = 0.04
+_TILE_BLOCK = 8
+_TILE_NEIGHBOR_L1 = 18.0
+_TILE_SAME_FRAC = 0.55
 _DPAD_BUTTONS = frozenset({"up", "down", "left", "right"})
+# Player sprite crop vs slightly larger background crop (facing-turn vs walk).
+_PLAYER_SPRITE_REGION = (64, 56, 32, 32)
+_PLAYER_BG_REGION = (40, 32, 80, 80)
+_SPRITE_MOVE_L1 = 8.0
+_BG_MOVE_L1 = BLOCKED_COARSE_L1
 
 
 def _as_rgb(frame: Any) -> np.ndarray:
@@ -181,25 +193,81 @@ def hash_named_regions(
     return {name: region_hash(rgb, box) for name, box in regions.items()}
 
 
-def _textbox_likely(rgb: np.ndarray) -> bool:
-    """Gen 1-style dialogue: dark bottom frame, much lighter inner window."""
-    if rgb.shape[0] < NATIVE_HEIGHT or rgb.shape[1] < NATIVE_WIDTH:
-        return False
-    bottom = rgb[_TEXTBOX_Y0:, :, :]
-    lum = _luminance(bottom)
-    inner = lum[6:42, 8:152]
-    if inner.size == 0:
-        return False
+def _near_uniform(rgb: np.ndarray, *, std_max: float = UNIFORM_LUMA_STD_MAX) -> bool:
+    """Near-solid black/white/fade: luminance variance too low for a playfield."""
+    if rgb.size == 0:
+        return True
+    return float(_luminance(rgb).std()) < std_max
+
+
+def _framed_light_window(
+    rgb: np.ndarray, *, y0: int, y1: int | None = None, x0: int = 0, x1: int | None = None
+) -> tuple[bool, tuple[int, int, int, int] | None]:
+    """Dark/high-contrast rectangular frame with a much lighter inner fill."""
+    height, width = rgb.shape[:2]
+    y1 = height if y1 is None else y1
+    x1 = width if x1 is None else x1
+    if y1 - y0 < 24 or x1 - x0 < 40:
+        return False, None
+    region = rgb[y0:y1, x0:x1]
+    lum = _luminance(region)
+    rh, rw = lum.shape
+    if rh < 16 or rw < 24:
+        return False, None
     border = np.concatenate(
-        (lum[:4, :].ravel(), lum[-4:, :].ravel(), lum[:, :4].ravel(), lum[:, -4:].ravel())
+        (lum[:3, :].ravel(), lum[-3:, :].ravel(), lum[:, :3].ravel(), lum[:, -3:].ravel())
     )
+    inner = lum[4 : rh - 4, 6 : rw - 6]
+    if inner.size == 0:
+        return False, None
     border_mean = float(border.mean())
     inner_mean = float(inner.mean())
-    return (
+    if not (
         border_mean < _TEXTBOX_BORDER_MAX
         and inner_mean > _TEXTBOX_INNER_MIN
         and (inner_mean - border_mean) > _TEXTBOX_CONTRAST_MIN
-    )
+    ):
+        return False, None
+    # Full-screen white flash is not a textbox.
+    if y0 <= 4 and y1 >= height - 4 and x0 <= 4 and x1 >= width - 4:
+        if float(lum.mean()) > 220.0 and float(lum.std()) < 25.0:
+            return False, None
+    # Thin HP bar tracks are not dialogue windows.
+    if rh <= 14:
+        return False, None
+    inner_box = (x0 + 6, y0 + 4, max(1, rw - 12), max(1, rh - 8))
+    return True, inner_box
+
+
+def textbox_inner_rect(frame: Any) -> tuple[int, int, int, int] | None:
+    """Native (x, y, w, h) of the textbox inner fill, or None."""
+    rgb = _as_rgb(frame)
+    ok, box = _textbox_rect(rgb)
+    return box if ok else None
+
+
+def _textbox_rect(rgb: np.ndarray) -> tuple[bool, tuple[int, int, int, int] | None]:
+    if rgb.shape[0] < NATIVE_HEIGHT or rgb.shape[1] < NATIVE_WIDTH:
+        return False, None
+    # Prefer the classic bottom dialogue strip (y≈96), then a slightly taller bottom third.
+    for y0 in (96, _TEXTBOX_BOTTOM_Y0):
+        ok, box = _framed_light_window(rgb, y0=y0)
+        if ok:
+            return True, box
+    # Centered / lower-center overlay (many adventure-game prompts).
+    ok, box = _framed_light_window(rgb, y0=48, y1=120, x0=16, x1=144)
+    if ok:
+        return True, box
+    ok, box = _framed_light_window(rgb, y0=56, y1=128, x0=8, x1=152)
+    if ok:
+        return True, box
+    return False, None
+
+
+def _textbox_likely(rgb: np.ndarray) -> bool:
+    """Framed light dialogue/prompt window — not a full-screen flash or HP bar."""
+    ok, _box = _textbox_rect(rgb)
+    return ok
 
 
 def _longest_bright_run(row: np.ndarray) -> int:
@@ -216,8 +284,38 @@ def _longest_bright_run(row: np.ndarray) -> int:
     return best
 
 
+def _bar_like_run(row: np.ndarray, min_run: int, max_run: int) -> bool:
+    """Compact bright track on an otherwise darker row — not a light wall band."""
+    flags = row.tolist()
+    best = 0
+    best_start = 0
+    current = 0
+    start = 0
+    for index, flag in enumerate(flags):
+        if flag:
+            if current == 0:
+                start = index
+            current += 1
+            if current > best:
+                best = current
+                best_start = start
+        else:
+            current = 0
+    if not (min_run <= best <= max_run):
+        return False
+    width = len(flags)
+    best_end = best_start + best
+    # Light facades light a half-screen band flush to an edge; status bars are inset tracks.
+    edge_flush = best_start == 0 or best_end == width
+    if edge_flush and best >= int(width * 0.45):
+        return False
+    if float(row.mean()) > 0.80:
+        return False
+    return True
+
+
 def _light_horizontal_strips(lum: np.ndarray) -> list[tuple[int, int]]:
-    """Thin compact HP-bar runs (height 2–10), not pavement or full-width ledges."""
+    """Thin compact status-bar runs (height 2–10), not pavement or full-width ledges."""
     if lum.size == 0:
         return []
     width = int(lum.shape[1])
@@ -226,7 +324,7 @@ def _light_horizontal_strips(lum: np.ndarray) -> list[tuple[int, int]]:
     max_run = max(min_run, int(round(_BAR_MAX_RUN * scale)))
     bright = lum >= _BAR_ROW_LUM_MIN
     is_bar = np.array(
-        [min_run <= _longest_bright_run(row) <= max_run for row in bright],
+        [_bar_like_run(row, min_run, max_run) for row in bright],
         dtype=bool,
     )
     strips: list[tuple[int, int]] = []
@@ -248,150 +346,151 @@ def _strip_in_band(strips: list[tuple[int, int]], y0: int, y1: int) -> bool:
     return any(y0 <= start + thickness // 2 < y1 for start, thickness in strips)
 
 
-def _greenish(mean_rgb: np.ndarray) -> bool:
-    r, g, b = (float(part) for part in mean_rgb)
-    return g >= r - 2 and g >= b - 2 and g > 30.0
+def _command_pane_rect(rgb: np.ndarray) -> tuple[int, int, int, int] | None:
+    """Light command rectangle (often bottom-right or bottom), or None."""
+    if rgb.shape[0] < 96 or rgb.shape[1] < 96:
+        return None
+    candidates: list[tuple[int, int, int, int]] = [
+        (80, 80, 80, 64),  # bottom-right
+        (0, 96, 160, 48),  # bottom strip
+        (80, 96, 80, 48),  # bottom-right lower
+        (0, 80, 80, 64),  # bottom-left
+    ]
+    best: tuple[int, int, int, int] | None = None
+    best_delta = 0.0
+    for x, y, w, h in candidates:
+        pane = rgb[y : y + h, x : x + w]
+        if pane.size == 0:
+            continue
+        pane_lum = _luminance(pane)
+        if float((pane_lum >= _MENU_LIGHT_MIN).mean()) < 0.40:
+            continue
+        row_slice = rgb[y : y + h]
+        if x >= 40:
+            rest = row_slice[:, : max(1, x)]
+        else:
+            rest = row_slice[:, min(rgb.shape[1], x + w) :]
+        if rest.size == 0:
+            continue
+        rest_lum = _luminance(rest)
+        delta = float(pane_lum.mean()) - float(rest_lum.mean())
+        if delta >= 20.0 and delta > best_delta:
+            best_delta = delta
+            best = (x, y, w, h)
+    return best
+
+
+def _command_pane_likely(rgb: np.ndarray) -> bool:
+    return _command_pane_rect(rgb) is not None
 
 
 def _fight_menu_pane_likely(rgb: np.ndarray) -> bool:
-    """Light command box in the bottom-right (Gen 1 FIGHT / PKMN / ITEM / RUN)."""
-    if rgb.shape[0] < 96 or rgb.shape[1] < 96:
-        return False
-    pane = rgb[80:144, 80:160]
-    rest = rgb[80:144, :80]
-    if pane.size == 0 or rest.size == 0:
-        return False
-    pane_lum = _luminance(pane)
-    rest_lum = _luminance(rest)
-    if float((pane_lum >= _MENU_LIGHT_MIN).mean()) < 0.40:
-        return False
-    return float(pane_lum.mean()) - float(rest_lum.mean()) >= 20.0
+    """Light command box — typically bottom-right on turn-based combat HUDs."""
+    return _command_pane_likely(rgb)
 
 
-def _fence_rows_likely(lum: np.ndarray) -> bool:
-    """Dark/light oscillating rows (ball fence / ledge posts), not HP bars."""
-    if lum.size == 0:
-        return False
-    hits = 0
-    for row in lum:
-        dark = row < 80.0
-        frac = float(dark.mean())
-        if frac < 0.12 or frac > 0.78:
-            continue
-        transitions = int(np.count_nonzero(dark[1:] != dark[:-1]))
-        if transitions >= 10:
-            hits += 1
-            if hits >= 5:
-                return True
-    return False
-
-
-def _tree_belt_likely(rgb: np.ndarray) -> bool:
-    """Darker green top belt vs mid field (Pallet/route trees), not a fight HUD."""
-    if rgb.shape[0] < 96:
-        return False
-    top = rgb[:40]
-    mid = rgb[40:96]
-    top_mean = top.reshape(-1, 3).mean(axis=0)
-    mid_mean = mid.reshape(-1, 3).mean(axis=0)
-    if not (_greenish(top_mean) and _greenish(mid_mean)):
-        return False
-    top_lum = float(_luminance(top).mean())
-    mid_lum = float(_luminance(mid).mean())
-    return (mid_lum - top_lum) >= 25.0
-
-
-def _house_windows_likely(rgb: np.ndarray) -> bool:
-    """Repeating light window tiles in the upper field (Pallet/Viridian houses)."""
-    if rgb.shape[0] < 80 or rgb.shape[1] < 80:
-        return False
-    top = rgb[:80]
-    lum = _luminance(top)
-    light = lum >= 190.0
-    hits = 0
-    y = 0
-    height = int(light.shape[0])
-    while y < height:
-        row = light[y]
-        runs: list[int] = []
-        run = 0
-        for flag in row.tolist():
-            if flag:
-                run += 1
-            else:
-                if 6 <= run <= 24:
-                    runs.append(run)
-                run = 0
-        if 6 <= run <= 24:
-            runs.append(run)
-        if len(runs) >= 2:
-            hits += 1
-            if hits >= 8:
-                return True
-            y += 1
-        else:
-            hits = 0
-            y += 1
-    return False
-
-
-def _overworld_reject(rgb: np.ndarray) -> bool:
-    """Fence / tree-belt / house windows without a fight-menu pane must not look like battle."""
-    if _fight_menu_pane_likely(rgb):
+def _tilemap_field_likely(rgb: np.ndarray) -> bool:
+    """Repeating 8×8-ish playfield with no command pane and no dual status bars."""
+    if _command_pane_likely(rgb):
         return False
     lum = _luminance(rgb)
-    if _fence_rows_likely(lum):
-        return True
-    if _tree_belt_likely(rgb):
-        return True
-    if _house_windows_likely(rgb):
-        return True
-    return False
+    strips = _light_horizontal_strips(lum)
+    height = lum.shape[0]
+    third = max(1, height // 3)
+    dual = _strip_in_band(strips, 0, third) and _strip_in_band(
+        strips, height // 2, height * 5 // 6
+    )
+    if dual:
+        return False
+    if _textbox_likely(rgb):
+        return False
+    # Avoid recursion into start_menu via classify; check pane geometry only.
+    mid = max(1, rgb.shape[1] // 2)
+    if _menu_pane_likely(rgb[:, :mid], rgb[:, mid:]) or _menu_pane_likely(
+        rgb[:, mid:], rgb[:, :mid]
+    ):
+        return False
+    block = _TILE_BLOCK
+    rows = height // block
+    cols = lum.shape[1] // block
+    if rows < 4 or cols < 4:
+        return False
+    means = (
+        rgb[: rows * block, : cols * block]
+        .reshape(rows, block, cols, block, 3)
+        .mean(axis=(1, 3))
+        .astype(np.float32)
+    )
+    same = 0
+    total = 0
+    for y in range(rows):
+        for x in range(cols - 1):
+            total += 1
+            if float(np.mean(np.abs(means[y, x] - means[y, x + 1]))) < _TILE_NEIGHBOR_L1:
+                same += 1
+        if y < rows - 1:
+            for x in range(cols):
+                total += 1
+                if float(np.mean(np.abs(means[y, x] - means[y + 1, x]))) < _TILE_NEIGHBOR_L1:
+                    same += 1
+    if total <= 0:
+        return False
+    return (same / float(total)) >= _TILE_SAME_FRAC
 
 
-def _battle_likely(rgb: np.ndarray) -> bool:
-    """Gen 1 fight LCD: both HP slots plus a HUD cue; never overworld."""
-    # textbox/start-menu helpers must not call back into _battle_likely.
-    if _textbox_likely(rgb) or _start_menu_likely(rgb):
-        return False
-    if _overworld_reject(rgb):
-        return False
+def _dual_status_bars(rgb: np.ndarray) -> bool:
+    """Two separated thin bright bar-like runs (upper vs lower status clusters)."""
     lum = _luminance(rgb)
     height = lum.shape[0]
+    strips = _light_horizontal_strips(lum)
+    third = max(1, height // 3)
+    return _strip_in_band(strips, 0, third) and _strip_in_band(
+        strips, height // 2, height * 5 // 6
+    )
+
+
+def _palette_split(rgb: np.ndarray) -> float:
+    height = rgb.shape[0]
     third = max(1, height // 3)
     top_mean = rgb[:third].reshape(-1, 3).mean(axis=0)
     bot_mean = rgb[-third:].reshape(-1, 3).mean(axis=0)
-    split = float(np.abs(top_mean - bot_mean).mean())
-    strips = _light_horizontal_strips(lum)
-    enemy_hi = third
-    player_lo = height // 2
-    player_hi = height * 5 // 6
-    slotted = _strip_in_band(strips, 0, enemy_hi) and _strip_in_band(
-        strips, player_lo, player_hi
-    )
-    if not slotted:
+    vertical = float(np.abs(top_mean - bot_mean).mean())
+    mid = max(1, rgb.shape[1] // 2)
+    left_mean = rgb[:, :mid].reshape(-1, 3).mean(axis=0)
+    right_mean = rgb[:, mid:].reshape(-1, 3).mean(axis=0)
+    horizontal = float(np.abs(left_mean - right_mean).mean())
+    return max(vertical, horizontal)
+
+
+def _battle_likely(rgb: np.ndarray) -> bool:
+    """Combat HUD: dual status clusters and/or a command pane — not a scrolling tilemap."""
+    # textbox/start-menu helpers must not call back into _battle_likely.
+    if _textbox_likely(rgb) or _start_menu_likely(rgb):
         return False
-    if _fight_menu_pane_likely(rgb) or split > _BATTLE_SPLIT_MIN:
+    if _tilemap_field_likely(rgb):
+        return False
+    split = _palette_split(rgb)
+    pane = _command_pane_likely(rgb)
+    dual = _dual_status_bars(rgb)
+    # Sufficient pattern: dual slotted bars + (command pane or strong split).
+    if dual and (pane or split > _BATTLE_SPLIT_MIN):
+        return True
+    # Framed command pane on a distinct HUD (split playfield, not overworld).
+    if pane and split > _BATTLE_SPLIT_MIN:
         return True
     return False
 
 
-def _textbox_complete(rgb: np.ndarray) -> bool:
-    """Dark ▼ / triangle in the inner textbox, after a finished line."""
-    if not _textbox_likely(rgb):
-        return False
-    lum = _luminance(rgb)
-    # Stay inside the inner window [100:140, 8:152], away from the dark frame.
-    patch = lum[128:138, 128:148]
+def _prompt_triangle(patch: np.ndarray) -> bool:
     if patch.size == 0:
         return False
     dark = patch < 90.0
     frac = float(dark.mean())
     if frac < 0.08 or frac > 0.50:
         return False
-    h = int(dark.shape[0])
-    upper = dark[: max(1, h // 2)]
-    lower = dark[max(0, h - 2) :]
+    hh = int(dark.shape[0])
+    upper = dark[: max(1, hh // 2)]
+    lower = dark[max(0, hh - 2) :]
     if int(upper.sum()) < 6 or int(upper.sum()) <= int(lower.sum()):
         return False
     spans: list[int] = []
@@ -402,6 +501,21 @@ def _textbox_complete(rgb: np.ndarray) -> bool:
     if len(nonzero) < 3:
         return False
     return nonzero[0] >= 3 and nonzero[-1] < nonzero[0]
+
+
+def _textbox_complete(rgb: np.ndarray) -> bool:
+    """Dark ▼ / triangle in the inner textbox, after a finished line."""
+    ok, inner = _textbox_rect(rgb)
+    if not ok or inner is None:
+        return False
+    lum = _luminance(rgb)
+    x, y, w, h = inner
+    # Prompt glyph sits in the lower-right of the inner fill.
+    patches = [
+        lum[y + max(0, h - 14) : y + h, x + max(0, w - 24) : x + w],
+        lum[128:138, 128:148],  # common bottom-box prompt band
+    ]
+    return any(_prompt_triangle(patch) for patch in patches)
 
 
 def textbox_complete(frame: Any) -> bool:
@@ -439,33 +553,69 @@ def coarse_mean_abs(
 
 
 def player_moved_from_frames(baseline: Any, current: Any) -> bool:
-    """True when the player-centered crop moved (camera scroll counts; NPCs in a corner do not)."""
-    return coarse_mean_abs(baseline, current) > BLOCKED_COARSE_L1
+    """True when the camera/background moved. Facing-only sprite turns stay false."""
+    base = _as_rgb(baseline)
+    cur = _as_rgb(current)
+    bg = coarse_mean_abs(base, cur, _PLAYER_BG_REGION)
+    if bg > _BG_MOVE_L1:
+        return True
+    # Coarse player crop (legacy): full-center motion still counts as moved.
+    return coarse_mean_abs(base, cur, PLAYER_BLOCKED_REGION) > BLOCKED_COARSE_L1
 
 
-_CURSOR_CELLS: tuple[tuple[str, int, int, int, int], ...] = (
-    ("fight", 88, 104, 36, 20),
-    ("pkmn", 124, 104, 36, 20),
-    ("item", 88, 124, 36, 20),
-    ("run", 124, 124, 36, 20),
-)
+def player_facing_turned(baseline: Any, current: Any) -> bool:
+    """Sprite pixels changed in the center but the background grid did not."""
+    base = _as_rgb(baseline)
+    cur = _as_rgb(current)
+    sprite = coarse_mean_abs(base, cur, _PLAYER_SPRITE_REGION)
+    bg = coarse_mean_abs(base, cur, _PLAYER_BG_REGION)
+    return sprite > _SPRITE_MOVE_L1 and bg <= _BG_MOVE_L1
 
 
-def fight_menu_visible(frame: Any) -> bool:
+def command_pane_visible(frame: Any) -> bool:
+    return _command_pane_likely(_as_rgb(frame))
+
+
+def command_pane_bottom_right_path(frame: Any) -> list[str]:
+    """D-pad + A toward the bottom-right cell of a detectable 2×2 command pane.
+
+    Empty when no pane is visible (do not invent a game-specific menu graph).
+    """
     rgb = _as_rgb(frame)
-    return _battle_likely(rgb) and _fight_menu_pane_likely(rgb)
+    rect = _command_pane_rect(rgb)
+    if rect is None:
+        return []
+    cell = command_pane_cursor_cell(rgb)
+    if cell == "br":
+        return ["a"]
+    if cell == "bl":
+        return ["right", "a"]
+    if cell == "tr":
+        return ["down", "a"]
+    if cell == "tl":
+        return ["down", "right", "a"]
+    # Unknown cursor: nudge toward bottom-right then confirm.
+    return ["down", "right", "a"]
 
 
-def fight_cursor_cell(frame: Any) -> str | None:
-    """Which Gen 1 2×2 fight-menu cell holds a dark ▶, or None."""
+def command_pane_cursor_cell(frame: Any) -> str | None:
+    """Which 2×2 command-pane cell holds a dark cursor, or None."""
     rgb = _as_rgb(frame)
-    if not _fight_menu_pane_likely(rgb) and not _battle_likely(rgb):
+    rect = _command_pane_rect(rgb)
+    if rect is None:
         return None
+    x, y, w, h = rect
     lum = _luminance(rgb)
+    cells = {
+        "tl": (x, y, w // 2, h // 2),
+        "tr": (x + w // 2, y, w - w // 2, h // 2),
+        "bl": (x, y + h // 2, w // 2, h - h // 2),
+        "br": (x + w // 2, y + h // 2, w - w // 2, h - h // 2),
+    }
     best_name: str | None = None
     best_score = 0.0
-    for name, x, y, _w, h in _CURSOR_CELLS:
-        cell = lum[y : y + h, x : x + 12]
+    for name, (cx, cy, cw, ch) in cells.items():
+        cell = lum[cy : cy + ch, cx : cx + min(12, max(1, cw))]
         if cell.size == 0:
             continue
         dark = cell < 70.0
@@ -478,8 +628,45 @@ def fight_cursor_cell(frame: Any) -> str | None:
     return best_name
 
 
+def fight_menu_visible(frame: Any) -> bool:
+    rgb = _as_rgb(frame)
+    return _battle_likely(rgb) and _command_pane_likely(rgb)
+
+
+_LEGACY_CURSOR_CELLS: tuple[tuple[str, int, int, int, int], ...] = (
+    ("fight", 88, 104, 36, 20),
+    ("pkmn", 124, 104, 36, 20),
+    ("item", 88, 124, 36, 20),
+    ("run", 124, 124, 36, 20),
+)
+
+
+def fight_cursor_cell(frame: Any) -> str | None:
+    """Compatibility: detect a dark cursor in a 2×2 command pane when present."""
+    rgb = _as_rgb(frame)
+    lum = _luminance(rgb)
+    # Prefer fixed bands used by common bottom-right 2×2 combat panes.
+    best_name: str | None = None
+    best_score = 0.0
+    for name, x, y, _w, h in _LEGACY_CURSOR_CELLS:
+        cell = lum[y : y + h, x : x + 12]
+        if cell.size == 0:
+            continue
+        dark = cell < 70.0
+        score = float(dark.mean())
+        if 0.08 <= score <= 0.70 and score > best_score:
+            best_score = score
+            best_name = name
+    if best_score >= 0.12:
+        return best_name
+    cell = command_pane_cursor_cell(rgb)
+    if cell is None:
+        return None
+    return {"tl": "fight", "tr": "pkmn", "bl": "item", "br": "run"}.get(cell)
+
+
 def _menu_pane_likely(pane: np.ndarray, rest: np.ndarray) -> bool:
-    """Light vertical pane covering most of the height, brighter than the rest."""
+    """Light vertical UI slab covering most of the height, brighter than the rest."""
     if pane.size == 0 or rest.size == 0:
         return False
     pane_lum = _luminance(pane)
@@ -497,14 +684,39 @@ def _menu_pane_likely(pane: np.ndarray, rest: np.ndarray) -> bool:
     return True
 
 
+def _full_width_menu_likely(rgb: np.ndarray) -> bool:
+    """Large high-contrast overlay covering most of the LCD (title / pause list)."""
+    if rgb.ndim != 3:
+        return False
+    lum = _luminance(rgb)
+    if _near_uniform(rgb) and float(lum.mean()) > 220.0:
+        return False
+    light = lum >= _MENU_LIGHT_MIN
+    if float(light.mean()) < 0.55:
+        return False
+    # Stacked list: many horizontal light rows with darker gaps.
+    row_frac = light.mean(axis=1)
+    light_rows = row_frac >= 0.70
+    if float(light_rows.mean()) < 0.45:
+        return False
+    transitions = int(np.count_nonzero(light_rows[1:] != light_rows[:-1]))
+    return transitions >= 4
+
+
 def _start_menu_likely(rgb: np.ndarray) -> bool:
-    """Vertical light pane on the left or right (Gen 1 Start is right-hand)."""
+    """Tall/large high-contrast overlay pane (pause / inventory / title menu)."""
     if rgb.ndim != 3 or rgb.shape[1] < 2:
+        return False
+    if _textbox_likely(rgb):
+        return False
+    if _near_uniform(rgb) and float(_luminance(rgb).mean()) > 220.0:
         return False
     mid = max(1, rgb.shape[1] // 2)
     left = rgb[:, :mid]
     right = rgb[:, mid:]
-    return _menu_pane_likely(left, right) or _menu_pane_likely(right, left)
+    if _menu_pane_likely(left, right) or _menu_pane_likely(right, left):
+        return True
+    return _full_width_menu_likely(rgb)
 
 
 def _largest_near_black_rect(
@@ -555,8 +767,17 @@ def _largest_near_black_rect(
     return best_box
 
 
-def _window_occluded_likely(rgb: np.ndarray) -> bool:
-    """Stale window slab: large near-black rectangle, rest still looks like a room."""
+def _black_frac(rgb: np.ndarray) -> float:
+    return float((_luminance(rgb) <= _OCCLUDE_BLACK_LUM).mean())
+
+
+def _window_occluded_likely(
+    rgb: np.ndarray,
+    *,
+    baseline: np.ndarray | None = None,
+    force_rect: bool = False,
+) -> bool:
+    """Large near-black takeover slab; thin static letterbox edges are scenery."""
     if rgb.ndim != 3 or rgb.shape[0] < 1 or rgb.shape[1] < 1:
         return False
     lum = _luminance(rgb)
@@ -566,13 +787,34 @@ def _window_occluded_likely(rgb: np.ndarray) -> bool:
         return False
     if black_frac < _OCCLUDE_MIN_AREA_FRAC * _OCCLUDE_FILL_FRAC:
         return False
+    # Gate the expensive rect search unless black grew / luma dropped vs baseline.
+    if baseline is not None and not force_rect:
+        base_lum = float(_luminance(baseline).mean())
+        base_black = _black_frac(baseline)
+        cur_lum = float(lum.mean())
+        if not (
+            (base_lum - cur_lum) >= _OCCLUDE_LUMA_DROP
+            or (black_frac - base_black) >= _OCCLUDE_BLACK_FRAC_RISE
+        ):
+            return False
+    elif not force_rect and baseline is None:
+        # Standalone classify(): still run, but reject thin edge letterbox
+        # (camera off-map bars) that leave most of the field textured.
+        pass
     box = _largest_near_black_rect(black, _OCCLUDE_FILL_FRAC)
     if box is None:
         return False
     y0, y1, x0, x1 = box
     height, width = lum.shape
     area = (y1 - y0) * (x1 - x0)
-    if area / float(height * width) < _OCCLUDE_MIN_AREA_FRAC:
+    area_frac = area / float(height * width)
+    if area_frac < _OCCLUDE_MIN_AREA_FRAC:
+        return False
+    # Thin letterbox strips on one edge are scenery, not a warp slab.
+    strip_h = y1 - y0
+    strip_w = x1 - x0
+    edge_flush = y0 == 0 or y1 == height or x0 == 0 or x1 == width
+    if edge_flush and area_frac < 0.35 and (strip_h <= 16 or strip_w <= 24):
         return False
     rest_mask = np.ones((height, width), dtype=bool)
     rest_mask[y0:y1, x0:x1] = False
@@ -586,13 +828,18 @@ def _window_occluded_likely(rgb: np.ndarray) -> bool:
     return True
 
 
-def classify(frame: Any) -> dict[str, bool]:
+def classify(frame: Any, *, baseline: Any | None = None) -> dict[str, bool]:
     rgb = _as_rgb(frame)
+    base = None if baseline is None else _as_rgb(baseline)
+    # With a call baseline, gate the expensive near-black rect search.
+    force_rect = baseline is None
     return {
         "textbox_likely": _textbox_likely(rgb),
         "battle_likely": _battle_likely(rgb),
         "start_menu_likely": _start_menu_likely(rgb),
-        "window_occluded_likely": _window_occluded_likely(rgb),
+        "window_occluded_likely": _window_occluded_likely(
+            rgb, baseline=base, force_rect=force_rect
+        ),
     }
 
 
@@ -628,7 +875,12 @@ class UntilMonitor:
         self._occluded_seen = False
         self._baseline_classifiers = classify(self.baseline_frame)
         self._baseline_luma = float(_luminance(self.baseline_frame).mean())
-        self._occluded_seen = bool(self._baseline_classifiers.get("window_occluded_likely"))
+        self._baseline_black_frac = _black_frac(self.baseline_frame)
+        # Static letterbox already on the baseline is scenery, not a warp-in-progress.
+        self._baseline_occluded = bool(
+            self._baseline_classifiers.get("window_occluded_likely")
+        )
+        self._occluded_seen = False
         until = getattr(play, "until", None)
         classifier = getattr(until, "classifier", None) if until is not None else None
         if until is not None and until.on == "classifier" and classifier:
@@ -636,6 +888,9 @@ class UntilMonitor:
             self._classifier_seen_true = present
             if until.classifier_polarity == "disappears" and not present:
                 self._disappear_met_at_baseline = True
+
+    def _classify(self, frame: np.ndarray) -> dict[str, bool]:
+        return classify(frame, baseline=self.baseline_frame)
 
     def evaluate(self, frame: Any, eval_index: int) -> StopDecision | None:
         rgb = np.array(_as_rgb(frame), copy=True, order="C")
@@ -652,13 +907,43 @@ class UntilMonitor:
         buttons = set(getattr(self.play, "buttons", ()) or ())
         return bool(buttons & _DPAD_BUTTONS)
 
+    def _playable_luma(self, frame: np.ndarray) -> float:
+        """Mean luma of non-near-black pixels (ignores static letterbox bars)."""
+        lum = _luminance(frame)
+        mask = lum > _OCCLUDE_BLACK_LUM
+        if not np.any(mask):
+            return float(lum.mean())
+        return float(lum[mask].mean())
+
+    def _fade_abort(self, frame: np.ndarray, *, delta: float, threshold: float) -> bool:
+        if delta <= threshold:
+            return False
+        luma_limit = float(
+            getattr(self.play, "default_hold_abort_luma_jump", DEFAULT_HOLD_ABORT_LUMA_JUMP)
+        )
+        # Full-screen uniform black/white.
+        if _near_uniform(frame):
+            return True
+        # Luma jump on the playable (non-letterbox) region.
+        playable_jump = abs(self._playable_luma(frame) - self._playable_luma(self.baseline_frame))
+        if playable_jump > luma_limit:
+            return True
+        # Occlusion that appeared this call (not the baseline letterbox).
+        occluded = bool(self._classify(frame).get("window_occluded_likely"))
+        if occluded and not self._baseline_occluded:
+            return True
+        black_rise = _black_frac(frame) - self._baseline_black_frac
+        if black_rise >= _OCCLUDE_BLACK_FRAC_RISE and playable_jump > luma_limit * 0.5:
+            return True
+        return False
+
     def _eval_default_hold_abort(
         self, frame: np.ndarray, *, eval_index: int = 0
     ) -> StopDecision | None:
         if not getattr(self.play, "apply_default_hold_abort", False):
             return None
-        # Battle / text / menu / fade outrank blocked on the same eval frame.
-        current = classify(frame)
+        # Text / combat / menu / fade outrank blocked on the same eval frame.
+        current = self._classify(frame)
         battle_became = (not self._baseline_classifiers.get("battle_likely")) and bool(
             current.get("battle_likely")
         )
@@ -672,17 +957,14 @@ class UntilMonitor:
             getattr(self.play, "default_hold_abort_threshold", DEFAULT_HOLD_ABORT_THRESHOLD)
         )
         delta = pixel_delta_fraction(self.baseline_frame, frame, DEFAULT_REGION)
-        if battle_became and delta > threshold:
+        # Combat abort requires a real HUD, not a tilemap field false positive.
+        if battle_became and delta > threshold and not _tilemap_field_likely(frame):
             return StopDecision("default_hold_abort", True, detail="battle")
         if textbox_became and delta > threshold:
             return StopDecision("default_hold_abort", True, detail="textbox")
         if menu_became and delta > threshold:
             return StopDecision("default_hold_abort", True, detail="menu")
-        luma_limit = float(
-            getattr(self.play, "default_hold_abort_luma_jump", DEFAULT_HOLD_ABORT_LUMA_JUMP)
-        )
-        luma_jump = abs(float(_luminance(frame).mean()) - self._baseline_luma)
-        if luma_jump > luma_limit and delta > threshold:
+        if self._fade_abort(frame, delta=delta, threshold=threshold):
             return StopDecision("default_hold_abort", True, detail="fade")
         if self._directional_hold():
             blocked = self._eval_blocked(frame, as_until=False, eval_index=eval_index)
@@ -723,18 +1005,23 @@ class UntilMonitor:
         luma_limit = float(
             getattr(self.play, "default_hold_abort_luma_jump", DEFAULT_HOLD_ABORT_LUMA_JUMP)
         )
-        luma_jump = abs(float(_luminance(frame).mean()) - self._baseline_luma)
-        occluded = bool(classify(frame).get("window_occluded_likely"))
-        if occluded:
+        playable_jump = abs(self._playable_luma(frame) - self._playable_luma(self.baseline_frame))
+        occluded = bool(self._classify(frame).get("window_occluded_likely"))
+        if occluded and not self._baseline_occluded:
             self._occluded_seen = True
-        if luma_jump > luma_limit:
+        if _near_uniform(frame) or playable_jump > luma_limit:
             return StopDecision("fade", True, detail="fade")
         if self._occluded_seen and not occluded:
             return StopDecision("fade", True, detail="fade")
         return None
 
     def _eval_overworld(self, frame: np.ndarray, until: Any) -> StopDecision | None:
-        if bool(classify(frame).get("battle_likely")):
+        flags = self._classify(frame)
+        if bool(flags.get("battle_likely")) or bool(flags.get("textbox_likely")):
+            self._stable_streak = 0
+            return None
+        # HUD gone but still on a solid fade/black — wait for texture.
+        if _near_uniform(frame):
             self._stable_streak = 0
             return None
         if self._prev_eval_frame is None:
@@ -765,6 +1052,10 @@ class UntilMonitor:
             return None
         if on == "stable":
             if self._prev_eval_frame is None:
+                return None
+            # Do not treat solid fade/black/white as a settled room.
+            if _near_uniform(frame):
+                self._stable_streak = 0
                 return None
             delta = pixel_delta_fraction(self._prev_eval_frame, frame, region)
             if delta < until.threshold:
@@ -798,7 +1089,7 @@ class UntilMonitor:
         name = until.classifier
         if not name:
             return None
-        present = bool(classify(frame).get(name))
+        present = bool(self._classify(frame).get(name))
         polarity = until.classifier_polarity
         public = _CLASSIFIER_PUBLIC.get(name, name)
         if polarity == "appears":

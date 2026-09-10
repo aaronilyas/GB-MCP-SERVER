@@ -154,12 +154,14 @@ def boot(
     name="play",
     description=(
         "Press Game Boy buttons and look at the returned image. Long mash/hold "
-        "returns a GIF of the action; a short tap stays a PNG. After boot, do "
-        "not pass email or id. Walk with a long directional hold (frames in the "
-        "hundreds); it aborts on battle, text, menu, fade, or blocked. buttons=[] "
+        "returns a GIF of the action plus a final native PNG; a short tap stays "
+        "a PNG of the last LCD. After boot, do not pass email or id. Omit frames "
+        "on a single D-pad to hold-walk (default 240); pass frames=16 to tap. "
+        "Holds abort on combat HUD, text, menu, fade, or blocked. buttons=[] "
         "waits. Optional frames, gap, mash, steps, until "
-        "(battle|textbox|menu|stable|fade|blocked), until_polarity "
-        "(appears|disappears), intent (advance_text|run_away|battle_turn), "
+        "(battle|textbox|menu|stable|fade|blocked|overworld), until_polarity "
+        "(appears|disappears), intent "
+        "(advance_text|run_away|battle_turn|skip_intro|enter_door), "
         "and media (image|video)."
     ),
 )
@@ -179,8 +181,9 @@ def play(
         Field(
             default=None,
             description=(
-                "Hold or wait frames. Default 16 (one tile). Use hundreds for a "
-                "walk; the hold aborts on battle, text, menu, fade, or blocked."
+                "Hold or wait frames. Omit on a single D-pad to walk (default 240 "
+                "hold). Pass frames=16 to tap one tile. A/B default 16. Holds abort "
+                "on combat HUD, text, menu, fade, or blocked."
             ),
         ),
     ] = None,
@@ -210,8 +213,10 @@ def play(
         Field(
             default=None,
             description=(
-                "Stop early on battle, textbox, menu, stable, fade, or blocked. "
-                "Aliases: textbox_end, clear_text, overworld."
+                "Stop early on battle, textbox, menu, stable, fade, blocked, or "
+                "overworld (HUD gone on a non-uniform field). Aliases: textbox_end, "
+                "clear_text. After a door prefer fade-disappears / overworld, not "
+                "stable-on-black."
             ),
         ),
     ] = None,
@@ -226,7 +231,10 @@ def play(
         str | None,
         Field(
             default=None,
-            description="advance_text, run_away, or battle_turn. Composed from buttons and until.",
+            description=(
+                "advance_text, run_away, battle_turn, skip_intro, or enter_door. "
+                "Composed from buttons and until; LCD-driven, not memory."
+            ),
         ),
     ] = None,
     media: Annotated[

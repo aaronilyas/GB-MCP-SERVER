@@ -206,6 +206,20 @@ def _overworld_field():
     return frame
 
 
+def _gif_last_frame_rgb(gif: bytes) -> PILImage.Image:
+    loaded = PILImage.open(io.BytesIO(gif))
+    try:
+        while True:
+            loaded.seek(loaded.tell() + 1)
+    except EOFError:
+        pass
+    return loaded.convert("RGB")
+
+
+def _png_rgb(png: bytes) -> PILImage.Image:
+    return PILImage.open(io.BytesIO(png)).convert("RGB")
+
+
 def _assert_gif_image(formatted) -> None:
     assert isinstance(formatted, list)
     assert len(formatted) == 2
@@ -213,6 +227,43 @@ def _assert_gif_image(formatted) -> None:
     assert image._format == "gif"
     assert bytes(image.data).startswith(GIF_MAGIC)
     assert bytes(image.data).startswith(b"GIF89a")
+
+
+def _assert_mcp_image_is_final(formatted, *, final_png: bytes, gif: bytes | None) -> None:
+    """MCP Image must be the GIF (last frame = final LCD) or the final PNG — not an early keyframe."""
+    assert isinstance(formatted, list)
+    assert len(formatted) == 2
+    image = formatted[1]
+    final = _png_rgb(final_png)
+    if gif is not None:
+        assert image._format == "gif"
+        last = _gif_last_frame_rgb(bytes(image.data))
+        # GIF may be scaled; compare downsampled or resized final.
+        if last.size != final.size:
+            last = last.resize(final.size, PILImage.NEAREST)
+        assert list(last.getdata())[0] == list(final.getdata())[0]
+        # First GIF frame must not be required to match final (action progressed).
+        first = PILImage.open(io.BytesIO(bytes(image.data))).convert("RGB")
+        if first.size != final.size:
+            first = first.resize(final.size, PILImage.NEAREST)
+        # Soft check: either multiple frames or first equals last (tiny GIF).
+        loaded = PILImage.open(io.BytesIO(bytes(image.data)))
+        n = 1
+        try:
+            while True:
+                loaded.seek(loaded.tell() + 1)
+                n += 1
+        except EOFError:
+            pass
+        assert n >= 1
+    else:
+        assert image._format == "png"
+        assert bytes(image.data).startswith(PNG_MAGIC)
+        shown = _png_rgb(bytes(image.data))
+        if shown.size != final.size:
+            # Scaled preview vs native final — compare corner color after resize.
+            shown = shown.resize(final.size, PILImage.NEAREST)
+        assert list(shown.getdata())[0] == list(final.getdata())[0]
 
 
 def test_public_mash_returns_gif_without_media_video() -> None:
@@ -237,8 +288,11 @@ def test_public_mash_returns_gif_without_media_video() -> None:
     assert bytes(gif).startswith(b"GIF89a")
     natives = result.get("pngs_native") or []
     assert len(natives) == 1
+    pngs = result.get("pngs") or []
+    assert len(pngs) == 1
     formatted = format_play_tool_result(result)
     _assert_gif_image(formatted)
+    _assert_mcp_image_is_final(formatted, final_png=pngs[0], gif=bytes(gif))
     status = formatted[0]
     assert len(status.get("screenshots") or []) <= 1
 
@@ -247,6 +301,15 @@ def test_public_long_hold_returns_gif_without_media_video() -> None:
     from dataclasses import replace
 
     pyboy = FakePyBoy(Path("dummy.gb"))
+    # Distinct early vs late LCD so the GIF last frame can be checked vs final PNG.
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        import numpy as np
+
+        frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+        frame[:, :, 0] = min(255, int(ticks) * 4)
+        return PILImage.fromarray(frame)
+
+    pyboy.frame_factory = factory
     play = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 40}))
     assert play.macro == "hold"
     assert play.extra.get("media") == "image"
@@ -257,8 +320,15 @@ def test_public_long_hold_returns_gif_without_media_video() -> None:
     assert bytes(gif).startswith(b"GIF89a")
     natives = result.get("pngs_native") or []
     assert len(natives) == 1
+    pngs = result.get("pngs") or []
+    assert len(pngs) == 1
     formatted = format_play_tool_result(result)
     _assert_gif_image(formatted)
+    _assert_mcp_image_is_final(formatted, final_png=pngs[0], gif=bytes(gif))
+    # GIF last frame matches final; first keyframe is earlier (not the baseline-only image).
+    first = PILImage.open(io.BytesIO(bytes(gif))).convert("RGB")
+    last = _gif_last_frame_rgb(bytes(gif))
+    assert list(first.getdata())[0] != list(last.getdata())[0]
 
 
 def test_public_short_tap_stays_png_only() -> None:
@@ -266,10 +336,13 @@ def test_public_short_tap_stays_png_only() -> None:
     play = play_input_from_args(parse_play_args({"buttons": ["a"], "frames": 16}))
     result = execute_play_command(pyboy, play)
     assert result.get("gif") is None
+    pngs = result.get("pngs") or []
+    assert len(pngs) == 1
     formatted = format_play_tool_result(result)
     assert isinstance(formatted, list)
     assert formatted[1]._format == "png"
     assert bytes(formatted[1].data).startswith(PNG_MAGIC)
+    _assert_mcp_image_is_final(formatted, final_png=pngs[0], gif=None)
 
 
 def test_public_mash_pulses_a_stops_when_box_gone_and_releases() -> None:

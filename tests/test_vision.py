@@ -89,6 +89,22 @@ def _pallet_like_overworld() -> np.ndarray:
     return frame
 
 
+def _letterboxed_overworld() -> np.ndarray:
+    """Textured 8×8 field with thin black right (16px) and bottom (8px) letterbox slabs."""
+    frame = _overworld_field()
+    frame[:, -16:, :] = (0, 0, 0)
+    frame[-8:, :, :] = (0, 0, 0)
+    return frame
+
+
+def _typewriter_partial_box() -> np.ndarray:
+    """Bottom framed window with only partially light inner (mean ~150)."""
+    frame = _solid((80, 160, 80))
+    frame[96:144, :, :] = (16, 16, 16)
+    frame[100:140, 8:152, :] = (150, 150, 150)
+    return frame
+
+
 def _route_like_grass() -> np.ndarray:
     """Two similar greens and no HP-bar strips."""
     frame = _solid((70, 150, 70))
@@ -130,7 +146,7 @@ def _fade_black() -> np.ndarray:
 
 
 def _overworld_field() -> np.ndarray:
-    """Pallet-like grass with an 8×8 checker, tree belt, path, and a house."""
+    """Textured overworld grass with an 8×8 checker, tree belt, path, and a house."""
     frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
     light = (88, 168, 72)
     dark = (56, 136, 56)
@@ -363,8 +379,8 @@ def test_start_menu_classifier_right_pane() -> None:
     assert flags["textbox_likely"] is False
 
 
-def test_live_pallet_overworld_is_not_a_battle() -> None:
-    """Captured Pallet pavement LCD must not trip battle_likely (2026-09-05)."""
+def test_live_textured_overworld_is_not_a_battle() -> None:
+    """Captured textured overworld LCD must not trip battle_likely (2026-09-05)."""
     frame = _load_fixture("pallet_overworld.png")
     flags = classify(frame)
     assert flags["battle_likely"] is False
@@ -373,8 +389,8 @@ def test_live_pallet_overworld_is_not_a_battle() -> None:
     assert flags["window_occluded_likely"] is False
 
 
-def test_pallet_overworld_is_not_battle_or_menu() -> None:
-    """Pallet trees, pavement, and house windows must not look like battle or Start."""
+def test_textured_overworld_is_not_battle_or_menu() -> None:
+    """Textured trees, pavement, and house windows must not look like battle or Start."""
     from gb_mcp.emulator.loop import shape_public_status
 
     for name in ("pallet_overworld.png", "lcd/pallet_like.png", "lcd/fence_like.png", "lcd/grass_like.png"):
@@ -412,8 +428,8 @@ def test_dark_rug_is_not_looks_like_fade() -> None:
     assert "looks_like" not in public
 
 
-def test_live_start_menu_right_pane_from_pallet() -> None:
-    """Captured Gen 1 Start menu (POKéDEX first, right-hand pane)."""
+def test_live_start_menu_right_pane() -> None:
+    """Captured Start menu with a light right-hand pane."""
     frame = _load_fixture("start_menu_right.png")
     flags = classify(frame)
     assert flags["start_menu_likely"] is True
@@ -421,7 +437,7 @@ def test_live_start_menu_right_pane_from_pallet() -> None:
     assert flags["textbox_likely"] is False
 
 
-def test_hold_abort_ignores_scroll_on_live_pallet() -> None:
+def test_hold_abort_ignores_scroll_on_live_textured_overworld() -> None:
     play = _hold_play()
     base = _load_fixture("pallet_overworld.png")
     monitor = UntilMonitor(play, base)
@@ -519,11 +535,11 @@ def test_window_occluded_slab_not_textbox_or_fade() -> None:
 
 
 def test_lcd_fixtures_battle_likely_overworld_vs_fight() -> None:
-    pallet = _load_fixture("lcd/pallet_like.png")
+    overworld = _load_fixture("lcd/pallet_like.png")
     fence = _load_fixture("lcd/fence_like.png")
     grass = _load_fixture("lcd/grass_like.png")
     fight = _load_fixture("lcd/fight_hud.png")
-    assert classify(pallet)["battle_likely"] is False
+    assert classify(overworld)["battle_likely"] is False
     assert classify(fence)["battle_likely"] is False
     assert classify(grass)["battle_likely"] is False
     assert classify(_pallet_like_overworld())["battle_likely"] is False
@@ -756,3 +772,60 @@ def test_screenshot_plan_keyframes_keep_interrupt() -> None:
     kinds = [item["kind"] for item in packed["screenshots"]]
     assert any("interrupt" in kind for kind in kinds)
     assert len(packed["pngs_native"]) >= 1
+
+
+def test_letterboxed_overworld_is_not_fade_battle_or_menu() -> None:
+    from gb_mcp.emulator.loop import shape_public_status
+
+    flags = classify(_letterboxed_overworld())
+    assert flags["battle_likely"] is False
+    assert flags["textbox_likely"] is False
+    assert flags["start_menu_likely"] is False
+    assert flags["window_occluded_likely"] is False
+    public = shape_public_status({"classifiers": flags, "running": True})
+    assert "looks_like" not in public
+
+
+def test_typewriter_partial_box_is_textbox() -> None:
+    frame = _typewriter_partial_box()
+    inner = frame[100:140, 8:152]
+    assert 130.0 <= float(inner.mean()) <= 170.0
+    assert classify(frame)["textbox_likely"] is True
+
+
+def test_hold_abort_camera_shift_with_trees_is_not_battle() -> None:
+    """Camera scroll + trees entering the top band must not default_hold_abort as battle."""
+    play = _hold_play()
+    base = _overworld_field()
+    monitor = UntilMonitor(play, base)
+    scrolled = np.roll(base, 8, axis=0)
+    scrolled[:24, :, :] = (24, 72, 24)
+    assert pixel_delta_fraction(base, scrolled, DEFAULT_REGION) > 0.12
+    decision = monitor.evaluate(scrolled, 0)
+    assert decision is None or decision.detail != "battle"
+    assert classify(scrolled)["battle_likely"] is False
+
+
+def test_until_stable_waits_for_room_texture_after_fade() -> None:
+    """until=stable must not complete on white/black; needs textured room."""
+    play = parse_play_input(
+        {
+            "buttons": ["a"],
+            "hold_frames": 40,
+            "until": {"on": "stable", "stable_frames": 3},
+        }
+    )
+    white = _solid((255, 255, 255))
+    black = _solid((0, 0, 0))
+    room = _room()
+    monitor = UntilMonitor(play, white)
+    assert monitor.evaluate(white, 0) is None
+    assert monitor.evaluate(black, 1) is None
+    assert monitor.evaluate(black, 2) is None
+    # First textured frame resets the streak vs fade; need stable_frames matches after that.
+    assert monitor.evaluate(room, 3) is None
+    assert monitor.evaluate(room, 4) is None
+    assert monitor.evaluate(room, 5) is None
+    done = monitor.evaluate(room.copy(), 6)
+    assert done is not None
+    assert done.reason == "stable"
