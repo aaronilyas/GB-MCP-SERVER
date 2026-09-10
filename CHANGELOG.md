@@ -2,14 +2,23 @@
 
 ## [Unreleased] — 2026-09-10
 
+### Screenshot-only play speed + game-agnostic LCD interrupts
+
+- The MCP Image is the **final** LCD of the call (4× PNG) or the action GIF — never an early keyframe. Public `screenshots` default to one native 160×144 `kind: "final"` (optional `interrupt` if an until/abort fired on another frame). Long mash/hold still pack a GIF; `media=image` does not hide it; the final native PNG remains in `screenshots`.
+- Omit `frames` on a single D-pad to hold-walk (**default 240**, `macro=hold` + default abort). Explicit `frames=16` stays a one-tile tap. A/B omitted frames stay 16. Mash without frames still uses the mash cap.
+- Classifiers describe **GB LCD geometry** for any uploaded ROM: framed dialogue windows (bottom or lower-center, typewriter-partial OK), combat HUDs (dual status bars and/or command pane; tilemap fields rejected), pause/title panes (left, right, or full-width), and fade/occlusion that is **new vs the start-of-call baseline** (static camera letterbox is scenery). `until=stable` / `overworld` ignore near-uniform black/white warps until texture returns.
+- Hold abort: real combat/menu/textbox/fade only — camera scroll on a textured field must not look like battle. Blocked grace ≥ ~16 frames so a facing turn is not `stopped_reason=blocked`.
+- Intents (still six public tools): `advance_text` waits for a box then mashes; `run_away` pulses B and only navigates a detected command pane; `battle_turn` confirms with A on classifier edges (not `until=stable`); new `skip_intro` and `enter_door`. No game-specific menu cell graph as the only path.
+- OCR crops the `textbox_likely` inner rect from the PNG. `HOW_TO_PLAY` stays ≤2000 chars and game-agnostic. History under `docs/history/` is frozen, not living API.
+
 ### Screenshot-only play: GIF default, mash pulses, honest looks_like, wall abort
 
 - Long public `play` mash and directional holds (`frames` ≥ 30) return one looping GIF (GIF89a, 1–3s) plus a native 160×144 final PNG. Short taps stay a single PNG. `media=video` is accepted; `media=image` does not suppress the GIF. Do not dump a PNG keyframe list as the default observation.
 - Public `play(buttons=["up"], frames=240)` is a directional **hold** with default abort (battle, text, menu, fade, blocked wall). A 16-frame tap stays a one-tile chord.
 - Public mash (`play(mash=true)` / `intent=advance_text`) pulses A (12 press / 8 release), stops when the textbox disappears, releases all buttons, then waits a short released gap so the next A does not re-talk. No textbox at start → brief wait, not hundreds of held-A frames.
 - `until_polarity=appears|disappears` (default appears). Aliases: `textbox_end` / `clear_text` (textbox disappears), `overworld` (battle gone then stable). Public `until=fade` is a luma jump vs start-of-call, not full-screen camera scroll. `until=blocked` is a coarse center crop (`PLAYER_BLOCKED_REGION` + `BLOCKED_COARSE_L1`) that stays still (walk-cycle bob and off-center NPCs ignored).
-- `looks_like` stays LCD-only and is omitted when no classifier is confidently true. Pallet/Route 1 trees, fences, grass, and house facades are not `battle` or `menu`. Fade is not a dark rug. `looks_like` prefers textbox over battle. `battle_likely` needs both HP-bar slots **and** a fight HUD cue (not in public JSON). Public JSON may include `stopped_reason`, `player_moved`, `textbox_complete`, and `ocr_text` (inner textbox crop only).
-- Public directional holds abort with `stopped_reason=blocked` / `player_moved=false` when the coarse center crop is stuck. Camera scroll and a south ledge jump still complete. Fight / Start / textbox / fade still abort first.
+- `looks_like` stays LCD-only and is omitted when no classifier is confidently true. Textured overworld / house facades are not `battle` or `menu`. Fade is not a dark rug. `looks_like` prefers textbox over battle. Public JSON may include `stopped_reason`, `player_moved`, `textbox_complete`, and `ocr_text` (inner textbox crop only).
+- Public directional holds abort with `stopped_reason=blocked` / `player_moved=false` when the coarse center crop is stuck. Camera scroll still completes. Combat / menu / textbox / fade still abort first.
 - Gap cap is 180 frames. Optional `intent`: `advance_text`, `run_away`, `battle_turn` — composed from existing engine primitives, not new MCP tools.
 - `HOW_TO_PLAY` teaches long holds, pulse mash, flee/turn intents, and reading the GIF on long walks. Catalog tests pin that text and the published `play` schema so a stale hosted deploy cannot silently serve the pre-GIF catalog.
 

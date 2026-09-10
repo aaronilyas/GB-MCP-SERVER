@@ -16,6 +16,14 @@ _OLD_TOOLS = (
     "submit_gb_rom",
     "map_subdirectory_to_email",
 )
+_GAME_SPECIFIC_NEEDLES = (
+    "pokemon",
+    "pallet",
+    "oak",
+    "brock",
+    "pkmn",
+    "squirtle",
+)
 
 
 def test_how_to_play_is_short_nonempty_str() -> None:
@@ -64,3 +72,17 @@ def test_how_to_play_teaches_gif_blocked_mash_and_intent() -> None:
         assert needle not in lower, needle
     for name in _TOOLS:
         assert name in text, name
+    assert "omit frames" in lower
+    assert "240" in text
+    assert "frames=16" in text
+    assert "skip_intro" in text
+    assert "enter_door" in text
+    assert "last screenshot" in lower
+    assert "overworld" in lower
+    assert "fade" in lower
+
+
+def test_how_to_play_omits_game_specific_needles() -> None:
+    lower = HOW_TO_PLAY.lower()
+    for needle in _GAME_SPECIFIC_NEEDLES:
+        assert needle not in lower, needle

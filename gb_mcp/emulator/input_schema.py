@@ -40,6 +40,7 @@ from gb_mcp.emulator.play_limits import (
     MIN_UNTIL_EVAL_INTERVAL,
     NATIVE_HEIGHT,
     NATIVE_WIDTH,
+    PUBLIC_DPAD_HOLD_FRAMES,
     PUBLIC_INTENTS,
     PUBLIC_KEYFRAME_MIN_FRAMES,
     PUBLIC_MASH_PRESS_FRAMES,
@@ -319,12 +320,18 @@ def _parse_intent(value: Any) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise ValueError("intent must be 'advance_text', 'run_away', or 'battle_turn'")
+        raise ValueError(
+            "intent must be 'advance_text', 'run_away', 'battle_turn', "
+            "'skip_intro', or 'enter_door'"
+        )
     intent = value.strip().lower()
     if not intent:
         return None
     if intent not in PUBLIC_INTENTS:
-        raise ValueError("intent must be 'advance_text', 'run_away', or 'battle_turn'")
+        raise ValueError(
+            "intent must be 'advance_text', 'run_away', 'battle_turn', "
+            "'skip_intro', or 'enter_door'"
+        )
     return intent
 
 
@@ -709,10 +716,12 @@ def _public_hold_buttons(buttons: tuple[str, ...], frames: int) -> bool:
 
 
 def _public_screenshot_mode(*, media: str, macro: str, planned: int) -> str:
+    # Public observation is the final LCD (plus optional interrupt). Long
+    # mash/hold still sample keyframes internally for GIF packing.
     if media == "video":
         return DEFAULT_SCREENSHOT_MODE
-    if planned > PUBLIC_KEYFRAME_MIN_FRAMES or macro in {"hold", "mash"}:
-        return "keyframes"
+    if macro == "hold" or (macro == "mash" and planned > PUBLIC_KEYFRAME_MIN_FRAMES):
+        return "interrupt_and_final"
     return DEFAULT_SCREENSHOT_MODE
 
 
@@ -797,7 +806,22 @@ def parse_play_args(payload: dict[str, Any]) -> PlayArgs:
     if not mash and not has_buttons and not has_steps and not intent:
         raise ValueError("at least one button is required")
 
-    frames_default = MAX_FRAMES_PER_CALL if mash else DEFAULT_PLAY_FRAMES
+    if has_buttons:
+        buttons = tuple(normalize_buttons(buttons_arg, allow_empty=True))
+    else:
+        buttons = ()
+
+    if mash:
+        frames_default = MAX_FRAMES_PER_CALL
+    elif (
+        payload.get("frames") is None
+        and len(buttons) == 1
+        and buttons[0] in _DIRECTION_BUTTONS
+    ):
+        # Single D-pad with frames omitted: walk hold, not a one-tile tap.
+        frames_default = PUBLIC_DPAD_HOLD_FRAMES
+    else:
+        frames_default = DEFAULT_PLAY_FRAMES
     frames = _normalize_bounded_int(
         payload.get("frames"),
         name="frames",
@@ -805,11 +829,6 @@ def parse_play_args(payload: dict[str, Any]) -> PlayArgs:
         minimum=1,
         maximum=MAX_HOLD_FRAMES,
     )
-
-    if has_buttons:
-        buttons = tuple(normalize_buttons(buttons_arg, allow_empty=True))
-    else:
-        buttons = ()
 
     steps: tuple[InputStep, ...]
     if has_steps:

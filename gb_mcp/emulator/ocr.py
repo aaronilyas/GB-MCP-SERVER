@@ -33,7 +33,7 @@ def ocr_pngs(pngs: list[bytes]) -> dict[str, Any]:
 
 
 def ocr_textbox_png(png: bytes) -> str | None:
-    """OCR the inner Gen 1 textbox (y>=96). Missing engines return None."""
+    """OCR the inner textbox fill via vision.textbox_inner_rect. Missing engines → None."""
     if not png:
         return None
     try:
@@ -42,18 +42,32 @@ def ocr_textbox_png(png: bytes) -> str | None:
     except Exception:
         return None
     try:
+        from gb_mcp.emulator.play_limits import NATIVE_HEIGHT, NATIVE_WIDTH
+        from gb_mcp.emulator.vision import textbox_inner_rect
+
         image = Image.open(io.BytesIO(png))
         if image.mode != "RGB":
             image = image.convert("RGB")
-        width, height = image.size
-        # Native 160×144 inner window; scaled previews keep the same fractions.
-        y0 = max(0, int(round(height * 102 / 144)))
-        y1 = min(height, int(round(height * 138 / 144)))
-        x0 = max(0, int(round(width * 8 / 160)))
-        x1 = min(width, int(round(width * 152 / 160)))
-        if y1 <= y0 or x1 <= x0:
+        # Classifier geometry is native 160×144; scale the crop if the PNG is upscaled.
+        native = image
+        if image.size != (NATIVE_WIDTH, NATIVE_HEIGHT):
+            native = image.resize((NATIVE_WIDTH, NATIVE_HEIGHT), Image.NEAREST)
+        rect = textbox_inner_rect(native)
+        if rect is None:
             return None
-        crop = image.crop((x0, y0, x1, y1))
+        x, y, w, h = rect
+        if w <= 0 or h <= 0:
+            return None
+        sx = image.width / float(NATIVE_WIDTH)
+        sy = image.height / float(NATIVE_HEIGHT)
+        crop = image.crop(
+            (
+                int(round(x * sx)),
+                int(round(y * sy)),
+                int(round((x + w) * sx)),
+                int(round((y + h) * sy)),
+            )
+        )
         # Tesseract needs more than 8px glyphs; nearest-neighbor 3× is still LCD-faithful.
         scaled = crop.resize((crop.width * 3, crop.height * 3), Image.NEAREST)
         text = pytesseract.image_to_string(scaled) or ""

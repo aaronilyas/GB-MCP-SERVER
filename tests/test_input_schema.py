@@ -116,21 +116,40 @@ def test_old_buttons_path_still_parses() -> None:
 def test_parse_play_args_buttons_defaults() -> None:
     args = parse_play_args({"buttons": ["up"]})
     assert args.buttons == ("up",)
-    assert args.frames == 16
+    assert args.frames == 240
     assert args.media == "image"
     assert "mash_press_frames" not in args.__dataclass_fields__
     play = play_input_from_args(args)
-    assert play.macro == "buttons"
+    assert play.macro == "hold"
     assert play.buttons == ("up",)
-    assert play.hold_frames == 16
-    assert play.steps[0].buttons == ("up",)
-    assert play.steps[0].hold_frames == 16
+    assert play.max_frames == 240
+    assert play.hold_frames == 240
+    assert play.apply_default_hold_abort is True
     assert play.screenshot_scale == DEFAULT_SCREENSHOT_SCALE
     assert play.screenshot_scale == 4
     assert play.emulation_speed == DEFAULT_EMULATION_SPEED
     assert play.emulation_speed == 0
-    assert play.screenshot_mode == DEFAULT_SCREENSHOT_MODE
+    assert play.screenshot_mode == "interrupt_and_final"
     assert play.extra["media"] == "image"
+
+
+def test_parse_play_args_dpad_omit_hold_vs_explicit_tap() -> None:
+    """Omit frames on a single D-pad → 240 hold; frames=16 stays a tap."""
+    omitted = play_input_from_args(parse_play_args({"buttons": ["up"]}))
+    assert omitted.macro == "hold"
+    assert omitted.max_frames == 240
+    assert omitted.apply_default_hold_abort is True
+    assert omitted.screenshot_mode == "interrupt_and_final"
+
+    tap = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 16}))
+    assert tap.macro == "buttons"
+    assert tap.hold_frames == 16
+    assert tap.apply_default_hold_abort is False
+    assert tap.screenshot_mode == DEFAULT_SCREENSHOT_MODE
+
+    a_omit = parse_play_args({"buttons": ["a"]})
+    assert a_omit.frames == 16
+    assert play_input_from_args(a_omit).macro == "buttons"
 
 
 def test_parse_play_args_empty_buttons_is_wait() -> None:
@@ -160,7 +179,7 @@ def test_parse_play_args_mash_true() -> None:
     assert play.mash_press_frames == PUBLIC_MASH_PRESS_FRAMES
     assert play.mash_release_frames == PUBLIC_MASH_RELEASE_FRAMES
     assert play.mash_press_frames != DEFAULT_MASH_PRESS_FRAMES
-    assert play.screenshot_mode == "keyframes"
+    assert play.screenshot_mode == "interrupt_and_final"
     assert play.until is not None
     assert play.until.on == "classifier"
     assert play.until.classifier == "textbox_likely"
@@ -252,7 +271,7 @@ def test_public_long_direction_is_hold_with_abort() -> None:
     assert hold.buttons == ("up",)
     assert hold.max_frames == 240
     assert hold.apply_default_hold_abort is True
-    assert hold.screenshot_mode == "keyframes"
+    assert hold.screenshot_mode == "interrupt_and_final"
 
     chord = play_input_from_args(parse_play_args({"buttons": ["a", "up"], "frames": 240}))
     assert chord.macro == "buttons"
@@ -305,6 +324,10 @@ def test_public_intent_parse() -> None:
     assert run.intent == "run_away"
     turn = parse_play_args({"intent": "battle_turn", "buttons": ["a"]})
     assert turn.intent == "battle_turn"
+    skip = parse_play_args({"intent": "skip_intro"})
+    assert skip.intent == "skip_intro"
+    door = parse_play_args({"intent": "enter_door"})
+    assert door.intent == "enter_door"
     with pytest.raises(ValueError, match="intent"):
         parse_play_args({"intent": "pathfind"})
 
