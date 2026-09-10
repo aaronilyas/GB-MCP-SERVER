@@ -45,7 +45,7 @@ def _solid(color: tuple[int, int, int]) -> np.ndarray:
 
 
 def _dialogue_bar(base: tuple[int, int, int] = (80, 160, 80)) -> np.ndarray:
-    """Overworld-ish field plus a Gen 1-like bottom window."""
+    """Overworld-ish field plus a framed bottom window."""
     frame = _solid(base)
     frame[96:144, :, :] = (16, 16, 16)
     frame[100:140, 8:152, :] = (248, 248, 248)
@@ -181,7 +181,7 @@ def test_hold_default_abort_on_screen_change() -> None:
 
 
 def test_hold_default_abort_ignores_overworld_scroll() -> None:
-    """Camera scroll over a Pallet-like field must not default-abort a d-pad hold."""
+    """Camera scroll over a textured tilemap field must not default-abort a d-pad hold."""
     from gb_mcp.emulator.input_engine import run_play_input
     from gb_mcp.emulator.vision import ScreenshotPlan, UntilMonitor, capture_native
 

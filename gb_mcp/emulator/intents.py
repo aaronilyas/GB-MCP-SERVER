@@ -449,7 +449,7 @@ def _battle_turn(
             parts.append(mash)
             total += int(mash.get("frames_advanced") or 0)
         else:
-            # Command pane or bare HUD: confirm with A (FIGHT+Tackle ≈ A,A across loops).
+            # Command pane or bare HUD: confirm with A.
             act = _run(
                 pyboy,
                 _base_payload(

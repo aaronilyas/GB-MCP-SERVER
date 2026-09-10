@@ -23,8 +23,8 @@ from gb_mcp.emulator.vision import (
     UntilMonitor,
     capture_native,
     classify,
+    command_pane_cursor_cell,
     encode_png,
-    fight_cursor_cell,
     hash_named_regions,
     pixel_delta_fraction,
     player_moved_from_frames,
@@ -73,13 +73,13 @@ def _start_menu(base: tuple[int, int, int] = (80, 160, 80)) -> np.ndarray:
 
 
 def _start_menu_right(base: tuple[int, int, int] = (80, 160, 80)) -> np.ndarray:
-    """Gen 1 Start menu: light pane on the right half."""
+    """Right-hand pause pane: light pane on the right half."""
     frame = _solid(base)
     frame[:, 80:, :] = (248, 248, 248)
     return frame
 
 
-def _pallet_like_overworld() -> np.ndarray:
+def _textured_overworld() -> np.ndarray:
     """Mid-green field, darker tree belt, lighter pavement, thin ledges."""
     frame = _solid((80, 160, 80))
     frame[:40, :, :] = (24, 72, 24)
@@ -360,7 +360,7 @@ def test_battle_classifier_split_layout() -> None:
     assert battle["textbox_likely"] is False
     assert battle["start_menu_likely"] is False
     assert classify(_solid((80, 160, 80)))["battle_likely"] is False
-    assert classify(_pallet_like_overworld())["battle_likely"] is False
+    assert classify(_textured_overworld())["battle_likely"] is False
     assert classify(_route_like_grass())["battle_likely"] is False
     assert classify(_interior_floor())["battle_likely"] is False
 
@@ -542,11 +542,11 @@ def test_lcd_fixtures_battle_likely_overworld_vs_fight() -> None:
     assert classify(overworld)["battle_likely"] is False
     assert classify(fence)["battle_likely"] is False
     assert classify(grass)["battle_likely"] is False
-    assert classify(_pallet_like_overworld())["battle_likely"] is False
+    assert classify(_textured_overworld())["battle_likely"] is False
     flags = classify(fight)
     assert flags["battle_likely"] is True
     assert flags["textbox_likely"] is False
-    assert fight_cursor_cell(fight) == "fight"
+    assert command_pane_cursor_cell(fight) == "tl"
 
 
 def test_textbox_complete_triangle() -> None:

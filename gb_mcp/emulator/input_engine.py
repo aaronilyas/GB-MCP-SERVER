@@ -8,7 +8,7 @@ from typing import Any, NamedTuple
 from gb_mcp.emulator.input_schema import PlayInput
 from gb_mcp.emulator.play_limits import MAX_FRAMES_PER_CALL, PUBLIC_MASH_ABORT_GAP_FRAMES
 
-# tick(n, render=False) can skip LCD work Gen 1 map scripts need.
+# tick(n, render=False) can skip LCD work GB window/PPU compose needs.
 _MAX_TICK_WITHOUT_RENDER = 4
 
 
@@ -272,7 +272,7 @@ def _tick_chunk(
     if count <= 0:
         return
     # A new button chord needs tick(1, render=True) before any render=False
-    # batch so LCD/PPU run (Gen 1 warps/collision). PyBoy tick(n, render=True)
+    # batch so LCD/PPU run (GB window/PPU compose). PyBoy tick(n, render=True)
     # composes only the last frame; never pass n>1 with render=True. Capture
     # and until-eval use render_last so the captured LCD is tick(1, True).
     if render_first:
