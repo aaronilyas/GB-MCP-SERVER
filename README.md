@@ -57,7 +57,7 @@ The supported operator/model catalog is six tools:
 | `add_rom` | Small homebrew: one `rom_base64` payload; isolated Docker validation; persist on success. Optional `email` |
 | `list_games` | Games mapped to this email (`title`, `id`, `playable`). Optional `email` |
 | `boot` | Start or resume a play instance. `reset=true` drops the PyBoy snapshot and cold-boots. Optional `email` |
-| `play` | Buttons / macros. Long directional `frames` is a hold that aborts on battle, text, menu, fade, or blocked. Returns native 160×144 PNG keyframes (plus a 4× preview, or a GIF when `media=video`). Screenshot-only — no memory dumps. No email argument |
+| `play` | Buttons / macros. Long directional `frames` is a hold that aborts on battle, text, menu, fade, or blocked. Long mash/hold returns a GIF of the action (plus a native 160×144 final PNG in `screenshots`); a short tap stays a PNG. Screenshot-only — no memory dumps. No email argument |
 | `save` | Write the PyBoy snapshot (`rom.gb.state`) without stopping. No email argument |
 | `stop` | Snapshot, flush cartridge SRAM (`rom.gb.ram`), remove the instance container. No email argument |
 

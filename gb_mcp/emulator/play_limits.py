@@ -74,6 +74,8 @@ PUBLIC_STOPPED_REASONS = frozenset(
 )
 PUBLIC_INTENTS = frozenset({"advance_text", "run_away", "battle_turn"})
 PUBLIC_KEYFRAME_MIN_FRAMES = 24
+# Mash / directional hold at or above this many planned frames pack a looping GIF.
+LONG_ACTION_FRAMES = 30
 
 # Defaults (breaking vs the previous 1x / 5-minute / native-PNG path).
 DEFAULT_EMULATION_SPEED = 0  # uncapped; pyboy.set_emulation_speed(0)
@@ -102,16 +104,28 @@ BOTTOM_REGION = (0, 96, 160, 48)
 CENTER_REGION = (40, 32, 80, 80)
 # Gen 1 player sprite is typically centered; 16×16 at (72, 72) is the public heuristic.
 PLAYER_SPRITE_REGION = (72, 72, 16, 16)
+# Larger center crop for wall-block detection (walk-cycle bob is averaged out).
+PLAYER_BLOCKED_REGION = (48, 40, 64, 64)
 DEFAULT_HASH_REGIONS: dict[str, tuple[int, int, int, int]] = {
     "full": DEFAULT_REGION,
     "bottom": BOTTOM_REGION,
     "center": CENTER_REGION,
 }
-# Blocked: full-screen still vs previous eval, crop still vs start or previous.
+# Blocked: coarse center-crop still vs previous eval. NPCs outside the crop are ignored.
 BLOCKED_FULL_DELTA = 0.04
 BLOCKED_CROP_DELTA = 0.10
 BLOCKED_CROP_PREV_DELTA = 0.50
+BLOCKED_BLOCK_SIZE = 8
+BLOCKED_CELL_TOLERANCE = 20
+BLOCKED_COARSE_DELTA = 0.30
+# Mean |RGB| of 8×8 cells. Walk-cycle bob is ~1.1; 1px camera scroll on textured
+# overworld is ~3.3. Stuck if consecutive evals stay at or below this.
+BLOCKED_COARSE_L1 = 2.5
+# Facing turn is ~8–16 frames; skip blocked until this many evals have a previous frame.
+BLOCKED_TURN_GRACE_EVALS = 3
 PLAYER_MOVED_FULL_DELTA = 0.04
+# Released ticks after public mash aborts so the next A does not re-talk.
+PUBLIC_MASH_ABORT_GAP_FRAMES = 12
 
 # Command wait is slightly above the engine wall-clock so the engine can
 # return stop_reason=call_timeout instead of raising TimeoutError.

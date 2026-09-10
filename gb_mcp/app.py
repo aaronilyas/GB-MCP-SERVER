@@ -153,10 +153,11 @@ def boot(
 @mcp.tool(
     name="play",
     description=(
-        "Press Game Boy buttons and look at the returned PNG keyframes or short "
-        "GIF. After boot, do not pass email or id. Walk with a long directional "
-        "hold (frames in the hundreds); it aborts on battle, text, menu, fade, or "
-        "blocked. buttons=[] waits. Optional frames, gap, mash, steps, until "
+        "Press Game Boy buttons and look at the returned image. Long mash/hold "
+        "returns a GIF of the action; a short tap stays a PNG. After boot, do "
+        "not pass email or id. Walk with a long directional hold (frames in the "
+        "hundreds); it aborts on battle, text, menu, fade, or blocked. buttons=[] "
+        "waits. Optional frames, gap, mash, steps, until "
         "(battle|textbox|menu|stable|fade|blocked), until_polarity "
         "(appears|disappears), intent (advance_text|run_away|battle_turn), "
         "and media (image|video)."
@@ -191,7 +192,10 @@ def play(
         bool | None,
         Field(
             default=None,
-            description="If true, mash A until frames or until. Use for dialogue.",
+            description=(
+                "If true, pulse A until the textbox is gone, then release. "
+                "Use for dialogue. Do not hold A."
+            ),
         ),
     ] = None,
     steps: Annotated[
@@ -227,7 +231,13 @@ def play(
     ] = None,
     media: Annotated[
         str | None,
-        Field(default=None, description="image (default PNG keyframes) or video (GIF when available)."),
+        Field(
+            default=None,
+            description=(
+                "image or video. Long mash/hold returns a GIF by default; "
+                "short taps stay a PNG. media=video is still valid."
+            ),
+        ),
     ] = None,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
     return play_tools.play(

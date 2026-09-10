@@ -6,7 +6,7 @@ import time
 from typing import Any, NamedTuple
 
 from gb_mcp.emulator.input_schema import PlayInput
-from gb_mcp.emulator.play_limits import MAX_FRAMES_PER_CALL
+from gb_mcp.emulator.play_limits import MAX_FRAMES_PER_CALL, PUBLIC_MASH_ABORT_GAP_FRAMES
 
 # tick(n, render=False) can skip LCD work Gen 1 map scripts need.
 _MAX_TICK_WITHOUT_RENDER = 4
@@ -115,18 +115,36 @@ def run_play_input(
                     eval_index += 1
                     if decision is not None:
                         _release_all(pyboy, pressed)
+                        stop_reason = getattr(decision, "reason", "completed")
+                        stop_detail = getattr(decision, "detail", None)
+                        until_fired = bool(getattr(decision, "until_fired", True))
                         if screenshot_plan is not None:
                             screenshot_plan.record(
                                 frames_advanced,
                                 frame,
                                 interrupt=True,
-                                final=True,
+                                final=play.macro != "mash",
                                 step_index=phase.step_index,
                             )
+                        if play.macro == "mash":
+                            gap = int(play.mash_release_frames or 0)
+                            gap = max(gap, PUBLIC_MASH_ABORT_GAP_FRAMES)
+                            gap = min(16, max(8, gap))
+                            if gap > 0:
+                                _tick_chunk(pyboy, gap, render_last=True)
+                                frames_advanced += gap
+                                frame = (
+                                    capture_native() if capture_native is not None else frame
+                                )
+                                if screenshot_plan is not None:
+                                    screenshot_plan.record(
+                                        frames_advanced,
+                                        frame,
+                                        interrupt=False,
+                                        final=True,
+                                        step_index=phase.step_index,
+                                    )
                         final_recorded = True
-                        stop_reason = getattr(decision, "reason", "completed")
-                        stop_detail = getattr(decision, "detail", None)
-                        until_fired = bool(getattr(decision, "until_fired", True))
                         break
                 if screenshot_plan is not None and (want or is_last or step_shot):
                     screenshot_plan.record(

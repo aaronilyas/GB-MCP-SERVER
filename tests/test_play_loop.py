@@ -629,22 +629,51 @@ def test_public_blocked_hold_stops_on_static_wall() -> None:
     assert public["player_moved"] is False
 
 
-def test_public_long_hold_returns_keyframes() -> None:
+def test_public_long_hold_returns_gif_not_png_list() -> None:
     from gb_mcp.emulator.play_runtime import execute_play_command
 
     pyboy = FakePyBoy(Path("dummy.gb"))
     play = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 40}))
     assert play.macro == "hold"
-    assert play.screenshot_mode == "keyframes"
-    # Unique-per-tick frames would not stay blocked; disable abort for this count test.
     from dataclasses import replace
 
     play = replace(play, disable_default_hold_abort=True, apply_default_hold_abort=False)
     result = execute_play_command(pyboy, play)
     natives = result.get("pngs_native") or []
-    assert len(natives) > 1
-    assert result.get("gif") is None
-    assert result.get("screenshot_mode") == "keyframes"
+    assert len(natives) == 1
+    gif = result.get("gif")
+    assert isinstance(gif, (bytes, bytearray))
+    assert bytes(gif).startswith(b"GIF8")
+
+
+def test_public_hold_blocks_when_npc_moves_in_corner() -> None:
+    from gb_mcp.emulator.loop import shape_public_status
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    wall = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+    wall[:, :] = (72, 148, 72)
+    wall[72:88, 72:88] = (200, 80, 80)
+    pyboy = FakePyBoy(Path("dummy.gb"))
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        frame = wall.copy()
+        x = 4 + (int(ticks) * 2) % 20
+        frame[2:18, x : x + 14] = (248, 248, 32)
+        return PILImage.fromarray(frame)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 200}))
+    from dataclasses import replace
+
+    play = replace(play, until_eval_interval=1)
+    result = execute_play_command(pyboy, play)
+    assert result["frames_advanced"] < 200
+    public = shape_public_status(result)
+    assert public["stopped_reason"] == "blocked"
+    assert public["player_moved"] is False
+    gif = result.get("gif")
+    assert isinstance(gif, (bytes, bytearray))
+    assert bytes(gif).startswith(b"GIF8")
 
 
 def test_intent_advance_text_noop_without_box() -> None:
@@ -656,6 +685,30 @@ def test_intent_advance_text_noop_without_box() -> None:
     play = play_input_from_args(parse_play_args({"intent": "advance_text"}))
     result = execute_play_command(pyboy, play)
     assert result["frames_advanced"] <= 16
+
+
+def test_intent_advance_text_returns_one_gif() -> None:
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    box = _dialogue_bar()
+    field = _overworld_field()
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        if ticks < 24:
+            return PILImage.fromarray(box)
+        return PILImage.fromarray(field)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(parse_play_args({"intent": "advance_text", "frames": 80}))
+    result = execute_play_command(pyboy, play)
+    pngs = result.get("pngs") or []
+    assert len(pngs) == 1
+    gif = result.get("gif")
+    assert isinstance(gif, (bytes, bytearray))
+    assert bytes(gif).startswith(b"GIF8")
+    natives = result.get("pngs_native") or []
+    assert len(natives) == 1
 
 
 def test_intent_run_away_returns_immediately_outside_battle() -> None:

@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased] — 2026-09-10
+
+### Screenshot-only play: GIF default, mash pulses, honest looks_like, wall abort
+
+- Long public `play` mash and directional holds (`frames` ≥ 30) return one looping GIF (GIF89a, 1–3s) plus a native 160×144 final PNG. Short taps stay a single PNG. `media=video` is unchanged; do not dump a PNG keyframe list as the default.
+- Public mash (`play(mash=true)` / `intent=advance_text`) pulses A (12 press / 8 release), stops when the textbox disappears, releases all buttons, then waits a short released gap so the next A does not re-talk. No textbox at start → brief wait, not hundreds of held-A frames.
+- `looks_like` stays LCD-only and is omitted when no classifier is confidently true. Pallet/Route 1 trees, fences, grass, and house facades are not `battle` or `menu`. Fade is not a dark rug.
+- Public directional holds abort with `stopped_reason=blocked` / `player_moved=false` when the coarse center crop is stuck (walk-cycle bob and off-center NPCs ignored). Camera scroll and a south ledge jump still complete. Fight / Start / textbox / fade still abort first.
+
 ## [Unreleased] — 2026-09-09
 
 ### Faster screenshot-only play
