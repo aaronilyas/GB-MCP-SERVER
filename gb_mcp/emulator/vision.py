@@ -15,9 +15,11 @@ import numpy as np
 from PIL import Image
 
 from gb_mcp.emulator.play_limits import (
-    BLOCKED_CROP_DELTA,
-    BLOCKED_CROP_PREV_DELTA,
-    BLOCKED_FULL_DELTA,
+    BLOCKED_BLOCK_SIZE,
+    BLOCKED_CELL_TOLERANCE,
+    BLOCKED_COARSE_DELTA,
+    BLOCKED_COARSE_L1,
+    BLOCKED_TURN_GRACE_EVALS,
     DEFAULT_HASH_REGIONS,
     DEFAULT_HOLD_ABORT_LUMA_JUMP,
     DEFAULT_HOLD_ABORT_THRESHOLD,
@@ -27,8 +29,7 @@ from gb_mcp.emulator.play_limits import (
     MAX_SCREENSHOT_ALL,
     NATIVE_HEIGHT,
     NATIVE_WIDTH,
-    PLAYER_MOVED_FULL_DELTA,
-    PLAYER_SPRITE_REGION,
+    PLAYER_BLOCKED_REGION,
     SCREENSHOT_SCALES,
 )
 
@@ -50,19 +51,22 @@ _BAR_MIN_RUN = 40
 _BAR_MAX_RUN = 112
 _BAR_THICKNESS = (2, 10)
 _MENU_LIGHT_MIN = 200.0
-_MENU_LIGHT_FRAC = 0.55
-_MENU_HEIGHT_FRAC = 0.70
+# Tall near-white pane (Start menu), not a brick facade or house wall.
+_MENU_LIGHT_FRAC = 0.65
+_MENU_HEIGHT_FRAC = 0.75
 _MENU_ROW_LIGHT_FRAC = 0.60
 # Pallet Start (right pane) vs overworld is ~26 lum; overworld halves differ ~7.
 _MENU_PANE_DELTA = 20.0
 
 # Stale GB window: a large near-black rectangle while the rest still looks like a room.
-_OCCLUDE_BLACK_LUM = 24.0
+# Furniture / dark rugs are dimmer brown, not this near-black.
+_OCCLUDE_BLACK_LUM = 12.0
 _OCCLUDE_FILL_FRAC = 0.90
 _OCCLUDE_MIN_AREA_FRAC = 0.25
 _OCCLUDE_FADE_FRAC = 0.88
 _OCCLUDE_ROOM_STD_MIN = 6.0
 _OCCLUDE_ROOM_BLACK_MAX = 0.40
+_DPAD_BUTTONS = frozenset({"up", "down", "left", "right"})
 
 
 def _as_rgb(frame: Any) -> np.ndarray:
@@ -299,14 +303,50 @@ def _tree_belt_likely(rgb: np.ndarray) -> bool:
     return (mid_lum - top_lum) >= 25.0
 
 
+def _house_windows_likely(rgb: np.ndarray) -> bool:
+    """Repeating light window tiles in the upper field (Pallet/Viridian houses)."""
+    if rgb.shape[0] < 80 or rgb.shape[1] < 80:
+        return False
+    top = rgb[:80]
+    lum = _luminance(top)
+    light = lum >= 190.0
+    hits = 0
+    y = 0
+    height = int(light.shape[0])
+    while y < height:
+        row = light[y]
+        runs: list[int] = []
+        run = 0
+        for flag in row.tolist():
+            if flag:
+                run += 1
+            else:
+                if 6 <= run <= 24:
+                    runs.append(run)
+                run = 0
+        if 6 <= run <= 24:
+            runs.append(run)
+        if len(runs) >= 2:
+            hits += 1
+            if hits >= 8:
+                return True
+            y += 1
+        else:
+            hits = 0
+            y += 1
+    return False
+
+
 def _overworld_reject(rgb: np.ndarray) -> bool:
-    """Fence / tree-belt / grass without a fight-menu pane must not look like battle."""
+    """Fence / tree-belt / house windows without a fight-menu pane must not look like battle."""
     if _fight_menu_pane_likely(rgb):
         return False
     lum = _luminance(rgb)
     if _fence_rows_likely(lum):
         return True
     if _tree_belt_likely(rgb):
+        return True
+    if _house_windows_likely(rgb):
         return True
     return False
 
@@ -370,9 +410,57 @@ def textbox_complete(frame: Any) -> bool:
     return _textbox_complete(_as_rgb(frame))
 
 
+def _coarse_grid(
+    rgb: np.ndarray,
+    box: tuple[int, int, int, int] = PLAYER_BLOCKED_REGION,
+    block: int = BLOCKED_BLOCK_SIZE,
+) -> np.ndarray | None:
+    """Mean RGB of each block×block cell in the center crop."""
+    crop = _crop(rgb, box)
+    height, width = crop.shape[:2]
+    rows = height // block
+    cols = width // block
+    if rows <= 0 or cols <= 0:
+        return None
+    trimmed = crop[: rows * block, : cols * block]
+    cells = trimmed.reshape(rows, block, cols, block, 3).mean(axis=(1, 3))
+    return cells.astype(np.float32)
+
+
+def coarse_changed_fraction(
+    baseline: Any,
+    current: Any,
+    region: tuple[int, int, int, int] = PLAYER_BLOCKED_REGION,
+) -> float:
+    """Fraction of coarse center-crop cells whose mean RGB moved more than walk-cycle noise."""
+    ga = _coarse_grid(_as_rgb(baseline), region)
+    gb = _coarse_grid(_as_rgb(current), region)
+    if ga is None or gb is None or ga.shape != gb.shape:
+        return 0.0
+    delta = np.abs(ga - gb)
+    changed = np.any(delta > BLOCKED_CELL_TOLERANCE, axis=-1)
+    count = int(changed.size)
+    if count == 0:
+        return 0.0
+    return float(np.count_nonzero(changed) / count)
+
+
+def coarse_mean_abs(
+    baseline: Any,
+    current: Any,
+    region: tuple[int, int, int, int] = PLAYER_BLOCKED_REGION,
+) -> float:
+    """Mean absolute RGB of coarse center-crop cells (0–255)."""
+    ga = _coarse_grid(_as_rgb(baseline), region)
+    gb = _coarse_grid(_as_rgb(current), region)
+    if ga is None or gb is None or ga.shape != gb.shape:
+        return 0.0
+    return float(np.mean(np.abs(ga - gb)))
+
+
 def player_moved_from_frames(baseline: Any, current: Any) -> bool:
-    """True when the full LCD moved this call (camera scroll counts as moving)."""
-    return pixel_delta_fraction(baseline, current, DEFAULT_REGION) > PLAYER_MOVED_FULL_DELTA
+    """True when the player-centered crop moved (camera scroll counts; NPCs in a corner do not)."""
+    return coarse_mean_abs(baseline, current) > BLOCKED_COARSE_L1
 
 
 _CURSOR_CELLS: tuple[tuple[str, int, int, int, int], ...] = (
@@ -570,28 +658,26 @@ class UntilMonitor:
                 self._disappear_met_at_baseline = True
 
     def evaluate(self, frame: Any, eval_index: int) -> StopDecision | None:
-        del eval_index
         rgb = np.array(_as_rgb(frame), copy=True, order="C")
         caller = self._eval_caller_until(rgb)
-        abort = self._eval_default_hold_abort(rgb)
+        abort = self._eval_default_hold_abort(rgb, eval_index=eval_index)
         self._prev_eval_frame = rgb
         if caller is not None:
             return caller
         return abort
 
-    def _eval_default_hold_abort(self, frame: np.ndarray) -> StopDecision | None:
+    def _directional_hold(self) -> bool:
+        if getattr(self.play, "macro", None) != "hold":
+            return False
+        buttons = set(getattr(self.play, "buttons", ()) or ())
+        return bool(buttons & _DPAD_BUTTONS)
+
+    def _eval_default_hold_abort(
+        self, frame: np.ndarray, *, eval_index: int = 0
+    ) -> StopDecision | None:
         if not getattr(self.play, "apply_default_hold_abort", False):
             return None
-        blocked = self._eval_blocked(frame, as_until=False)
-        if blocked is not None:
-            return StopDecision("default_hold_abort", True, detail="blocked")
-        threshold = float(
-            getattr(self.play, "default_hold_abort_threshold", DEFAULT_HOLD_ABORT_THRESHOLD)
-        )
-        delta = pixel_delta_fraction(self.baseline_frame, frame, DEFAULT_REGION)
-        if delta <= threshold:
-            return None
-        # Second gate: battle/text/menu appearance or a fade-sized luma jump, not camera scroll.
+        # Battle / text / menu / fade outrank blocked on the same eval frame.
         current = classify(frame)
         battle_became = (not self._baseline_classifiers.get("battle_likely")) and bool(
             current.get("battle_likely")
@@ -602,18 +688,26 @@ class UntilMonitor:
         menu_became = (not self._baseline_classifiers.get("start_menu_likely")) and bool(
             current.get("start_menu_likely")
         )
-        if battle_became:
+        threshold = float(
+            getattr(self.play, "default_hold_abort_threshold", DEFAULT_HOLD_ABORT_THRESHOLD)
+        )
+        delta = pixel_delta_fraction(self.baseline_frame, frame, DEFAULT_REGION)
+        if battle_became and delta > threshold:
             return StopDecision("default_hold_abort", True, detail="battle")
-        if textbox_became:
+        if textbox_became and delta > threshold:
             return StopDecision("default_hold_abort", True, detail="textbox")
-        if menu_became:
+        if menu_became and delta > threshold:
             return StopDecision("default_hold_abort", True, detail="menu")
         luma_limit = float(
             getattr(self.play, "default_hold_abort_luma_jump", DEFAULT_HOLD_ABORT_LUMA_JUMP)
         )
         luma_jump = abs(float(_luminance(frame).mean()) - self._baseline_luma)
-        if luma_jump > luma_limit:
+        if luma_jump > luma_limit and delta > threshold:
             return StopDecision("default_hold_abort", True, detail="fade")
+        if self._directional_hold():
+            blocked = self._eval_blocked(frame, as_until=False, eval_index=eval_index)
+            if blocked is not None:
+                return StopDecision("default_hold_abort", True, detail="blocked")
         return None
 
     def _blocked_needed(self, *, as_until: bool) -> int:
@@ -623,16 +717,20 @@ class UntilMonitor:
         return int(DEFAULT_STABLE_FRAMES)
 
     def _is_blocked(self, frame: np.ndarray) -> bool:
+        """Stuck walker: coarse player crop stable vs previous eval. Ignore the rest of the LCD."""
         if self._prev_eval_frame is None:
             return False
-        full_prev = pixel_delta_fraction(self._prev_eval_frame, frame, DEFAULT_REGION)
-        if full_prev > BLOCKED_FULL_DELTA:
-            return False
-        crop_start = pixel_delta_fraction(self.baseline_frame, frame, PLAYER_SPRITE_REGION)
-        crop_prev = pixel_delta_fraction(self._prev_eval_frame, frame, PLAYER_SPRITE_REGION)
-        return crop_start <= BLOCKED_CROP_DELTA or crop_prev <= BLOCKED_CROP_PREV_DELTA
+        return coarse_mean_abs(self._prev_eval_frame, frame) <= BLOCKED_COARSE_L1
 
-    def _eval_blocked(self, frame: np.ndarray, *, as_until: bool) -> StopDecision | None:
+    def _eval_blocked(
+        self, frame: np.ndarray, *, as_until: bool, eval_index: int = 0
+    ) -> StopDecision | None:
+        if self._prev_eval_frame is None:
+            self._blocked_streak = 0
+            return None
+        if not as_until and eval_index < BLOCKED_TURN_GRACE_EVALS:
+            self._blocked_streak = 0
+            return None
         if self._is_blocked(frame):
             self._blocked_streak += 1
         else:

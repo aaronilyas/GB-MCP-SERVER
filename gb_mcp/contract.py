@@ -17,11 +17,11 @@ reset=true cold-boots and drops the snapshot.
 list_games, boot, and add_rom take optional email. Consent or token email also binds; explicit email wins.
 If unbound, they ask for email — do not invent one. After boot, play / save / stop take no email.
 Walk with a long directional hold (frames in the hundreds). It aborts on battle, text, menu, fade, or blocked. Do not tap 16 frames.
-Dialogue: mash A or intent=advance_text until the box is gone. Do not A-spam in 8-frame steps.
+Dialogue: mash A or intent=advance_text until the box is gone. Mash pulses A; do not hold A.
 If looks_like=battle, use intent=run_away or intent=battle_turn. Do not open START.
 After a door, wait through fade then until=stable before walking.
 If player_moved is false or stopped_reason=blocked, change direction. Do not repeat the same hold.
-On long walks, look at keyframes or the GIF, not only the last frame.
+On long walks, look at the GIF, not only the last frame.
 until: battle|textbox|menu|stable|fade|blocked. until_polarity appears|disappears (or until=textbox_end).
 One live session per user. save snapshots; stop and idle auto-save then close.
 Large ROM dumps use HTTP POST /roms, not chat chunks. Small homebrew may use add_rom with rom_base64.

@@ -373,6 +373,45 @@ def test_live_pallet_overworld_is_not_a_battle() -> None:
     assert flags["window_occluded_likely"] is False
 
 
+def test_pallet_overworld_is_not_battle_or_menu() -> None:
+    """Pallet trees, pavement, and house windows must not look like battle or Start."""
+    from gb_mcp.emulator.loop import shape_public_status
+
+    for name in ("pallet_overworld.png", "lcd/pallet_like.png", "lcd/fence_like.png", "lcd/grass_like.png"):
+        flags = classify(_load_fixture(name))
+        assert flags["battle_likely"] is False, name
+        assert flags["start_menu_likely"] is False, name
+        public = shape_public_status({"classifiers": flags, "running": True})
+        assert "looks_like" not in public, name
+
+
+def test_building_facade_is_not_start_menu() -> None:
+    """A brick/house wall is not a Start menu even when one half is lighter."""
+    frame = _solid((80, 160, 80))
+    frame[:, 80:] = (210, 190, 170)
+    frame[:18, 80:] = (120, 64, 40)
+    for y in (24, 56, 88):
+        for x in (92, 124):
+            frame[y : y + 14, x : x + 16] = (80, 140, 200)
+    frame[110:144, 112:132] = (70, 40, 24)
+    flags = classify(frame)
+    assert flags["start_menu_likely"] is False
+    assert flags["battle_likely"] is False
+
+
+def test_dark_rug_is_not_looks_like_fade() -> None:
+    """A furnished room with a dark rug is not fade / window occlusion."""
+    from gb_mcp.emulator.loop import shape_public_status
+
+    frame = _room()
+    frame[78:118, 36:124] = (18, 14, 10)
+    flags = classify(frame)
+    assert flags["window_occluded_likely"] is False
+    public = shape_public_status({"classifiers": flags, "running": True})
+    assert public.get("looks_like") != "fade"
+    assert "looks_like" not in public
+
+
 def test_live_start_menu_right_pane_from_pallet() -> None:
     """Captured Gen 1 Start menu (POKéDEX first, right-hand pane)."""
     frame = _load_fixture("start_menu_right.png")
@@ -599,13 +638,102 @@ def test_default_hold_abort_blocked_on_static_wall() -> None:
     assert play.apply_default_hold_abort is True
     monitor = UntilMonitor(play, wall)
     decision = None
-    for index in range(16):
+    for index in range(24):
         decision = monitor.evaluate(wall, index)
         if decision is not None:
             break
     assert decision is not None
     assert decision.reason == "default_hold_abort"
     assert decision.detail == "blocked"
+
+
+def _player_bob(base: np.ndarray, phase: int) -> np.ndarray:
+    """16×16 walk-cycle bob in the player crop; rest of the LCD is still."""
+    frame = base.copy()
+    y = 72 + (phase % 2) * 2
+    x = 72
+    frame[y : y + 16, x : x + 16] = (200, 72, 72)
+    return frame
+
+
+def test_walk_cycle_center_crop_blocks_after_grace() -> None:
+    base = _overworld_field()
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 80,
+            "until_eval_interval": 1,
+        }
+    )
+    monitor = UntilMonitor(play, base)
+    decision = None
+    for index in range(24):
+        decision = monitor.evaluate(_player_bob(base, index), index)
+        if decision is not None:
+            break
+    assert decision is not None
+    assert decision.reason == "default_hold_abort"
+    assert decision.detail == "blocked"
+    # Facing turn / first evals must not abort.
+    early = UntilMonitor(play, base)
+    assert early.evaluate(_player_bob(base, 0), 0) is None
+    assert early.evaluate(_player_bob(base, 1), 1) is None
+
+
+def test_npc_in_corner_does_not_prevent_blocked() -> None:
+    base = _overworld_field()
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 80,
+            "until_eval_interval": 1,
+        }
+    )
+    monitor = UntilMonitor(play, base)
+    decision = None
+    for index in range(24):
+        frame = _player_bob(base, 0)
+        x = 4 + (index * 3) % 24
+        frame[4:20, x : x + 16] = (248, 248, 40)
+        decision = monitor.evaluate(frame, index)
+        if decision is not None:
+            break
+    assert decision is not None
+    assert decision.detail == "blocked"
+
+
+def test_full_screen_scroll_is_not_blocked() -> None:
+    field = _overworld_field()
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 40,
+            "until_eval_interval": 1,
+        }
+    )
+    monitor = UntilMonitor(play, field)
+    for shift in range(1, 20):
+        decision = monitor.evaluate(np.roll(field, shift, axis=0), shift)
+        assert decision is None
+
+
+def test_battle_takeover_is_battle_not_blocked() -> None:
+    play = parse_play_input(
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 80,
+            "until_eval_interval": 1,
+        }
+    )
+    monitor = UntilMonitor(play, _overworld_field())
+    decision = monitor.evaluate(_battle(), 0)
+    assert decision is not None
+    assert decision.reason == "default_hold_abort"
+    assert decision.detail == "battle"
 
 
 def test_screenshot_plan_keyframes_keep_interrupt() -> None:

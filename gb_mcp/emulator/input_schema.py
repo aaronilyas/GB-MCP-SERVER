@@ -90,11 +90,10 @@ class PlayInput:
     until: UntilSpec | None
     until_eval_interval: int
     disable_default_hold_abort: bool
-    # Two-gate default abort for macro=hold (force-off via this flag or until.on=none):
-    # full-frame pixel_delta > default_hold_abort_threshold (0.12) AND
-    # (battle_likely or start_menu_likely became true vs start-of-call, or mean
-    # luminance jumped by more than DEFAULT_HOLD_ABORT_LUMA_JUMP). Camera scroll
-    # and 1–3 tile walks do not abort; battle takeover, start menu, and warp fade do.
+    # Default abort for macro=hold (force-off via this flag or until.on=none):
+    # battle/text/menu appearance or a fade-sized luma jump (full-frame delta
+    # > 0.12), or a directional hold whose coarse player crop stays still
+    # (blocked wall). Camera scroll and 1–3 tile walks do not abort.
     apply_default_hold_abort: bool
     default_hold_abort_threshold: float
     default_hold_abort_luma_jump: float
@@ -559,6 +558,13 @@ def parse_play_input(payload: dict[str, Any], *, session_speed: int | None = Non
                 f"call_timeout_seconds must be between 0 exclusive and {MAX_CALL_TIMEOUT_SECONDS}"
             )
 
+    extra: dict[str, Any] = {}
+    media = payload.get("media")
+    if isinstance(media, str) and media.strip().lower() in PUBLIC_MEDIA:
+        extra["media"] = media.strip().lower()
+    if payload.get("public_mash"):
+        extra["public_mash"] = True
+
     return PlayInput(
         macro=resolved_macro,
         steps=tuple(steps),
@@ -583,6 +589,7 @@ def parse_play_input(payload: dict[str, Any], *, session_speed: int | None = Non
         call_timeout_seconds=timeout,
         planned_frames=min(planned, max_frames),
         intent=intent,
+        extra=extra,
     )
 
 
@@ -866,6 +873,13 @@ def play_input_from_args(args: PlayArgs) -> PlayInput:
         payload["max_frames"] = args.frames
         payload["mash_press_frames"] = PUBLIC_MASH_PRESS_FRAMES
         payload["mash_release_frames"] = PUBLIC_MASH_RELEASE_FRAMES
+        payload["public_mash"] = True
+        if until_spec is None:
+            payload["until"] = {
+                "on": "classifier",
+                "classifier": "textbox_likely",
+                "classifier_polarity": "disappears",
+            }
         resolved_macro = "mash"
         planned = args.frames
     elif args.steps:
@@ -901,7 +915,10 @@ def play_input_from_args(args: PlayArgs) -> PlayInput:
         media=args.media, macro=resolved_macro, planned=planned
     )
     play = parse_play_input(payload)
-    extra = {"media": args.media}
+    extra = dict(play.extra or {})
+    extra["media"] = args.media
     if args.intent:
         extra["intent"] = args.intent
+    if args.mash:
+        extra["public_mash"] = True
     return replace(play, extra=extra)

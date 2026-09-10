@@ -161,6 +161,11 @@ def test_parse_play_args_mash_true() -> None:
     assert play.mash_release_frames == PUBLIC_MASH_RELEASE_FRAMES
     assert play.mash_press_frames != DEFAULT_MASH_PRESS_FRAMES
     assert play.screenshot_mode == "keyframes"
+    assert play.until is not None
+    assert play.until.on == "classifier"
+    assert play.until.classifier == "textbox_likely"
+    assert play.until.classifier_polarity == "disappears"
+    assert play.extra.get("public_mash") is True
 
 
 @pytest.mark.parametrize(

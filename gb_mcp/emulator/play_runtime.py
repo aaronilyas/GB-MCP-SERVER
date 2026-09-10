@@ -12,11 +12,17 @@ from typing import Any
 
 from PIL import Image
 
-from gb_mcp.emulator.input_schema import PlayInput, parse_play_input
+from gb_mcp.emulator.input_schema import InputStep, PlayInput, UntilSpec, parse_play_input
 from gb_mcp.emulator.input_engine import run_play_input
 from gb_mcp.emulator.play_limits import (
     DEFAULT_HASH_REGIONS,
+    DEFAULT_REGION,
+    DEFAULT_STABLE_FRAMES,
+    LONG_ACTION_FRAMES,
     NATIVE_SIZE,
+    PUBLIC_MASH_ABORT_GAP_FRAMES,
+    PUBLIC_MASH_PRESS_FRAMES,
+    PUBLIC_MASH_RELEASE_FRAMES,
     SEND_INPUT_RESPONSE_KEYS,
 )
 from gb_mcp.emulator.vision import (
@@ -30,7 +36,7 @@ from gb_mcp.emulator.vision import (
 )
 
 # Mash / long hold: sample internally, then pack one short GIF. Not a public mode.
-_LONG_ACTION_FRAMES = 30
+_LONG_ACTION_FRAMES = LONG_ACTION_FRAMES
 _GIF_MIN_MS = 1000
 _GIF_MAX_MS = 3000
 _GIF_TARGET_MS = 2000
@@ -43,6 +49,7 @@ def execute_play_command(
     *,
     session_speed: int | None = None,
     monotonic=time.monotonic,
+    pack_media: bool = True,
 ) -> dict[str, Any]:
     """Run one send_pyboy_input payload against a live PyBoy-like object."""
     if isinstance(payload, PlayInput):
@@ -55,16 +62,27 @@ def execute_play_command(
             # asdict(PlayInput) for a buttons chord includes both; steps win.
             raw.pop("buttons", None)
         play = parse_play_input(raw, session_speed=session_speed)
+        extra = dict(play.extra or {})
+        media_arg = raw.get("media")
+        if isinstance(media_arg, str) and media_arg.strip():
+            extra.setdefault("media", media_arg.strip().lower())
+        if raw.get("public_mash"):
+            extra["public_mash"] = True
+        if extra:
+            play = replace(play, extra=extra)
     if play.intent:
         from gb_mcp.emulator.intents import execute_intent
 
         return execute_intent(pyboy, play, session_speed=session_speed, monotonic=monotonic)
+    play = _rewrite_public_mash_without_box(pyboy, play)
     public_mode = play.screenshot_mode
     media = str((play.extra or {}).get("media") or "image")
     play, sampled_internally = _with_internal_keyframes(play)
     baseline = capture_native(pyboy)
     monitor = UntilMonitor(play, baseline)
     plan = ScreenshotPlan(play)
+    if wants_action_gif(play):
+        plan.record(0, baseline, interrupt=False, final=False)
     result = run_play_input(
         pyboy,
         play,
@@ -92,7 +110,10 @@ def execute_play_command(
     result.setdefault("default_hold_abort_applied", play.apply_default_hold_abort)
     result.setdefault("gap_frames", play.gap_frames)
     result.setdefault("screenshot_mode", public_mode)
-    result["player_moved"] = player_moved_from_frames(baseline, final_frame)
+    moved = player_moved_from_frames(baseline, final_frame)
+    if result.get("stop_detail") == "blocked" or result.get("stop_reason") == "blocked":
+        moved = False
+    result["player_moved"] = moved
     if flags.get("textbox_likely"):
         result["textbox_complete"] = textbox_complete(final_frame)
     if getattr(plan, "interrupt_frame_index", None) is not None:
@@ -101,13 +122,14 @@ def execute_play_command(
         result.update(_maybe_ocr(result.get("pngs") or []))
     elif flags.get("textbox_likely"):
         _attach_public_ocr(result)
-    _apply_action_media(
-        result,
-        want_gif=wants_action_gif(play),
-        public_screenshot_mode=public_mode,
-        sampled_internally=sampled_internally,
-        media=media,
-    )
+    if pack_media:
+        _apply_action_media(
+            result,
+            want_gif=wants_action_gif(play),
+            public_screenshot_mode=public_mode,
+            sampled_internally=sampled_internally,
+            media=media,
+        )
     return strip_forbidden_keys(result)
 
 
@@ -142,6 +164,53 @@ def _attach_public_ocr(result: dict[str, Any]) -> None:
         result["ocr_text"] = text
 
 
+def _is_public_mash(play: PlayInput) -> bool:
+    extra = play.extra or {}
+    if extra.get("public_mash"):
+        return True
+    return (
+        play.macro == "mash"
+        and play.mash_press_frames == PUBLIC_MASH_PRESS_FRAMES
+        and play.mash_release_frames == PUBLIC_MASH_RELEASE_FRAMES
+    )
+
+
+def _rewrite_public_mash_without_box(pyboy: Any, play: PlayInput) -> PlayInput:
+    """Public mash must not hold A. No textbox → brief wait instead of hundreds of frames."""
+    if play.macro != "mash" or not _is_public_mash(play):
+        return play
+    flags = classify(capture_native(pyboy))
+    if flags.get("textbox_likely"):
+        until = play.until
+        if until is None:
+            play = replace(
+                play,
+                until=UntilSpec(
+                    region=DEFAULT_REGION,
+                    on="classifier",
+                    threshold=0.08,
+                    stable_frames=DEFAULT_STABLE_FRAMES,
+                    classifier="textbox_likely",
+                    classifier_polarity="disappears",
+                ),
+            )
+        return play
+    wait = PUBLIC_MASH_ABORT_GAP_FRAMES
+    return replace(
+        play,
+        macro="steps",
+        steps=(InputStep(buttons=(), hold_frames=wait, gap_frames=0, wait=True),),
+        buttons=(),
+        max_frames=wait,
+        planned_frames=wait,
+        hold_frames=wait,
+        until=None,
+        apply_default_hold_abort=False,
+        disable_default_hold_abort=True,
+        intent=None,
+    )
+
+
 def wants_action_gif(play: Any) -> bool:
     """True for mash / long hold that should be sampled into one GIF."""
     if getattr(play, "macro", None) not in {"mash", "hold"}:
@@ -169,9 +238,11 @@ def pack_action_media(pngs: list[bytes], *, want_gif: bool) -> dict[str, Any]:
 
 
 def _with_internal_keyframes(play: PlayInput) -> tuple[PlayInput, bool]:
-    # Public keyframes keep the PNG list. The legacy mash/hold GIF path still
-    # samples internally when the caller asked for screenshot_mode=final.
-    if play.screenshot_mode != "final" or not wants_action_gif(play):
+    # Sample mash/hold internally so a GIF can be packed even if the public
+    # screenshot_mode was "final" (media=video) or the hold aborts early.
+    if not wants_action_gif(play):
+        return play, False
+    if play.screenshot_mode == "keyframes":
         return play, False
     return replace(play, screenshot_mode="keyframes"), True
 
@@ -187,8 +258,11 @@ def _apply_action_media(
     pngs = result.get("pngs") or []
     if not isinstance(pngs, list):
         pngs = [pngs]
-    keep_natives = public_screenshot_mode == "keyframes" and not sampled_internally
-    emit_gif = want_gif and (sampled_internally or media == "video")
+    # Long mash/hold pack a GIF even when the caller omitted media="video".
+    emit_gif = bool(want_gif) or media == "video"
+    keep_natives = (
+        public_screenshot_mode == "keyframes" and not sampled_internally and not emit_gif
+    )
     if not emit_gif:
         return
     packed = pack_action_media(pngs, want_gif=True)
@@ -199,7 +273,6 @@ def _apply_action_media(
         result.pop("gif", None)
         result.pop("gifs", None)
     if keep_natives:
-        # GIF is extra for media=video; public JSON still gets the keyframe PNG list.
         result["screenshot_count"] = len(result.get("pngs_native") or result.get("pngs") or [])
         return
     result["pngs"] = packed.get("pngs") or []

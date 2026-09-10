@@ -63,7 +63,7 @@ def _run(
 ) -> dict[str, Any]:
     from gb_mcp.emulator.play_runtime import execute_play_command
 
-    kwargs: dict[str, Any] = {}
+    kwargs: dict[str, Any] = {"pack_media": False}
     if session_speed is not None:
         kwargs["session_speed"] = session_speed
     if monotonic is not None:
@@ -110,11 +110,25 @@ def _merge(parts: list[dict[str, Any]]) -> dict[str, Any]:
                 pngs.append(bytes(blob))
     last = dict(parts[-1])
     last["frames_advanced"] = frames
+    last.pop("gif", None)
+    last.pop("gifs", None)
+    if pngs:
+        from gb_mcp.emulator.play_runtime import pack_action_media, strip_forbidden_keys
+
+        packed = pack_action_media(pngs, want_gif=len(pngs) >= 2)
+        last["pngs"] = packed.get("pngs") or pngs[-1:]
+        last["screenshot_count"] = len(last["pngs"])
+        gif = packed.get("gif")
+        if gif:
+            last["gif"] = gif
+            if natives:
+                last["pngs_native"] = natives[-1:]
+        elif natives:
+            last["pngs_native"] = natives[-MAX_SCREENSHOT_ALL:]
+        last["screenshot_mode"] = "final" if gif else "keyframes"
+        return strip_forbidden_keys(last)
     if natives:
         last["pngs_native"] = natives[-MAX_SCREENSHOT_ALL:]
-    if pngs:
-        last["pngs"] = pngs[-MAX_SCREENSHOT_ALL:]
-        last["screenshot_count"] = len(last["pngs"])
     last["screenshot_mode"] = "keyframes"
     return last
 
