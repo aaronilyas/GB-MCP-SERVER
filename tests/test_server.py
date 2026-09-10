@@ -12,6 +12,7 @@ from mcp.server.mcpserver.utilities.types import Image
 import db
 import server
 from gb_mcp import config
+from gb_mcp.contract import HOW_TO_PLAY
 from gb_mcp.emulator.loop import PUBLIC_STATUS_KEYS
 from gb_mcp.emulator.play_limits import FORBIDDEN_RESPONSE_KEY_NEEDLES
 from gb_mcp.http import oauth_token_claims
@@ -141,8 +142,32 @@ def test_email_arg_only_on_list_boot_add_rom() -> None:
 
 
 def test_instructions_match_how_to_play() -> None:
+    assert server.mcp.instructions == HOW_TO_PLAY
     assert server.mcp.instructions == server.HOW_TO_PLAY
-    assert server.how_to_play_resource() == server.HOW_TO_PLAY
+    assert server.how_to_play_resource() == HOW_TO_PLAY
+
+
+def test_play_tool_schema_pins_gif_blocked_intent_catalog() -> None:
+    tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
+    assert len(tools) == 6
+    assert set(tools) == set(_PUBLIC_TOOL_NAMES)
+    play = tools["play"]
+    schema = play.parameters or {}
+    props = schema.get("properties") or {}
+    for name in ("until", "until_polarity", "intent", "mash"):
+        assert name in props, name
+    until_desc = (props["until"].get("description") or "").lower()
+    assert "blocked" in until_desc
+    desc = (play.description or "").lower()
+    mash_desc = (props["mash"].get("description") or "").lower()
+    blob = f"{desc} {mash_desc}"
+    assert "gif" in desc
+    assert "pulse" in blob
+    assert "release" in mash_desc
+    assert "mash a for frames ticks" not in blob
+    assert "png keyframes" not in blob
+    for old in ("blake2s", "battle_likely", "ping_pyboy", "send_pyboy_input"):
+        assert old not in blob, old
 
 
 def test_add_rom_rejects_invalid_base64() -> None:

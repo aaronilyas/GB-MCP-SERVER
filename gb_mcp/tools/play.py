@@ -122,15 +122,13 @@ def _screenshot_entries(pngs: list[bytes]) -> list[dict[str, Any]]:
 
 def format_play_tool_result(
     result: dict[str, Any],
-    *,
-    want_video: bool = False,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
     """Shape an engine send_input dict into the MCP play return.
 
     Public JSON gets native 160x144 ``screenshots``. If the engine attached a
     GIF (long mash/hold), the MCP Image is that GIF even when the caller
-    omitted media="video". Short taps stay a PNG. Internal hashes / paths
-    stay stripped.
+    omitted ``media="video"`` or passed ``media="image"``. Short taps stay a
+    PNG. Internal hashes / paths stay stripped.
     """
     pngs = _as_png_list(result.get("pngs"))
     gif = result.get("gif")
@@ -289,6 +287,7 @@ def play(
     Long directional ``frames`` become a hold that aborts on battle, text,
     menu, fade, or a blocked wall. Dialogue uses mash or ``intent=advance_text``.
     Long mash/hold returns a GIF of the action; a short tap stays a PNG.
+    ``media="video"`` is accepted; ``media="image"`` does not suppress the GIF.
     """
     bound = require_email()
     if isinstance(bound, dict):
@@ -352,7 +351,7 @@ def play(
             }
         )
 
-    return format_play_tool_result(result, want_video=args.media == "video")
+    return format_play_tool_result(result)
 
 
 def save() -> dict[str, Any]:

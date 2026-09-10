@@ -237,7 +237,7 @@ def test_public_mash_returns_gif_without_media_video() -> None:
     assert bytes(gif).startswith(b"GIF89a")
     natives = result.get("pngs_native") or []
     assert len(natives) == 1
-    formatted = format_play_tool_result(result, want_video=False)
+    formatted = format_play_tool_result(result)
     _assert_gif_image(formatted)
     status = formatted[0]
     assert len(status.get("screenshots") or []) <= 1
@@ -257,7 +257,7 @@ def test_public_long_hold_returns_gif_without_media_video() -> None:
     assert bytes(gif).startswith(b"GIF89a")
     natives = result.get("pngs_native") or []
     assert len(natives) == 1
-    formatted = format_play_tool_result(result, want_video=False)
+    formatted = format_play_tool_result(result)
     _assert_gif_image(formatted)
 
 
@@ -266,7 +266,7 @@ def test_public_short_tap_stays_png_only() -> None:
     play = play_input_from_args(parse_play_args({"buttons": ["a"], "frames": 16}))
     result = execute_play_command(pyboy, play)
     assert result.get("gif") is None
-    formatted = format_play_tool_result(result, want_video=False)
+    formatted = format_play_tool_result(result)
     assert isinstance(formatted, list)
     assert formatted[1]._format == "png"
     assert bytes(formatted[1].data).startswith(PNG_MAGIC)
