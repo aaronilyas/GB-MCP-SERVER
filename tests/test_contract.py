@@ -8,6 +8,7 @@ _FORBIDDEN = (
     "battle_likely",
     "begin_gb_rom_upload",
     "ping_pyboy",
+    "send_pyboy_input",
     "bearer",
 )
 _OLD_TOOLS = (
@@ -48,3 +49,18 @@ def test_how_to_play_omits_old_tool_names() -> None:
     text = HOW_TO_PLAY.lower()
     for name in _OLD_TOOLS:
         assert name not in text, name
+
+
+def test_how_to_play_teaches_gif_blocked_mash_and_intent() -> None:
+    text = HOW_TO_PLAY
+    assert len(text.strip()) <= HOW_TO_PLAY_MAX_CHARS
+    assert "GIF" in text
+    assert "blocked" in text
+    assert "Mash pulses" in text
+    assert "intent" in text
+    assert "until_polarity" in text or "textbox_end" in text
+    lower = text.lower()
+    for needle in ("blake2s", "battle_likely", "ping_pyboy", "send_pyboy_input"):
+        assert needle not in lower, needle
+    for name in _TOOLS:
+        assert name in text, name

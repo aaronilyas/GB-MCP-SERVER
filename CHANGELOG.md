@@ -4,21 +4,14 @@
 
 ### Screenshot-only play: GIF default, mash pulses, honest looks_like, wall abort
 
-- Long public `play` mash and directional holds (`frames` ≥ 30) return one looping GIF (GIF89a, 1–3s) plus a native 160×144 final PNG. Short taps stay a single PNG. `media=video` is unchanged; do not dump a PNG keyframe list as the default.
+- Long public `play` mash and directional holds (`frames` ≥ 30) return one looping GIF (GIF89a, 1–3s) plus a native 160×144 final PNG. Short taps stay a single PNG. `media=video` is accepted; `media=image` does not suppress the GIF. Do not dump a PNG keyframe list as the default observation.
+- Public `play(buttons=["up"], frames=240)` is a directional **hold** with default abort (battle, text, menu, fade, blocked wall). A 16-frame tap stays a one-tile chord.
 - Public mash (`play(mash=true)` / `intent=advance_text`) pulses A (12 press / 8 release), stops when the textbox disappears, releases all buttons, then waits a short released gap so the next A does not re-talk. No textbox at start → brief wait, not hundreds of held-A frames.
-- `looks_like` stays LCD-only and is omitted when no classifier is confidently true. Pallet/Route 1 trees, fences, grass, and house facades are not `battle` or `menu`. Fade is not a dark rug.
-- Public directional holds abort with `stopped_reason=blocked` / `player_moved=false` when the coarse center crop is stuck (walk-cycle bob and off-center NPCs ignored). Camera scroll and a south ledge jump still complete. Fight / Start / textbox / fade still abort first.
-
-## [Unreleased] — 2026-09-09
-
-### Faster screenshot-only play
-
-- Public `play(buttons=["up"], frames=240)` is a directional **hold** with default abort (battle, text, menu, fade, blocked wall). A 16-frame tap stays a one-tile chord. Long A/B holds skip dialogue the same way.
-- `until_polarity=appears|disappears` (default appears). Aliases: `textbox_end` / `clear_text` (textbox disappears), `overworld` (battle gone then stable). Public `until=fade` is a luma jump vs start-of-call, not full-screen camera scroll. New `until=blocked` is an LCD player-sprite crop that stays still while the rest of the screen is still.
-- `looks_like` prefers textbox over battle. `battle_likely` now needs both HP-bar slots **and** a fight HUD cue, and rejects Pallet/fence/grass overworld. Public JSON may include `stopped_reason`, `player_moved`, `textbox_complete`, and `ocr_text` (inner textbox crop only).
-- Planned frames > 24, or public hold/mash, return PNG **keyframes** unless `media=video` (GIF as before). Gap cap is 180 frames. Public mash timing is 12 press / 8 release.
-- Optional `intent`: `advance_text`, `run_away`, `battle_turn` — composed from existing engine primitives, not new MCP tools.
-- `HOW_TO_PLAY` teaches long holds, text mash, flee/turn intents, and reading keyframes.
+- `until_polarity=appears|disappears` (default appears). Aliases: `textbox_end` / `clear_text` (textbox disappears), `overworld` (battle gone then stable). Public `until=fade` is a luma jump vs start-of-call, not full-screen camera scroll. `until=blocked` is a coarse center crop (`PLAYER_BLOCKED_REGION` + `BLOCKED_COARSE_L1`) that stays still (walk-cycle bob and off-center NPCs ignored).
+- `looks_like` stays LCD-only and is omitted when no classifier is confidently true. Pallet/Route 1 trees, fences, grass, and house facades are not `battle` or `menu`. Fade is not a dark rug. `looks_like` prefers textbox over battle. `battle_likely` needs both HP-bar slots **and** a fight HUD cue (not in public JSON). Public JSON may include `stopped_reason`, `player_moved`, `textbox_complete`, and `ocr_text` (inner textbox crop only).
+- Public directional holds abort with `stopped_reason=blocked` / `player_moved=false` when the coarse center crop is stuck. Camera scroll and a south ledge jump still complete. Fight / Start / textbox / fade still abort first.
+- Gap cap is 180 frames. Optional `intent`: `advance_text`, `run_away`, `battle_turn` — composed from existing engine primitives, not new MCP tools.
+- `HOW_TO_PLAY` teaches long holds, pulse mash, flee/turn intents, and reading the GIF on long walks. Catalog tests pin that text and the published `play` schema so a stale hosted deploy cannot silently serve the pre-GIF catalog.
 
 ## [Unreleased] — 2026-09-08
 

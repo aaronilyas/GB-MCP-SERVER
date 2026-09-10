@@ -16,8 +16,6 @@ from PIL import Image
 
 from gb_mcp.emulator.play_limits import (
     BLOCKED_BLOCK_SIZE,
-    BLOCKED_CELL_TOLERANCE,
-    BLOCKED_COARSE_DELTA,
     BLOCKED_COARSE_L1,
     BLOCKED_TURN_GRACE_EVALS,
     DEFAULT_HASH_REGIONS,
@@ -425,24 +423,6 @@ def _coarse_grid(
     trimmed = crop[: rows * block, : cols * block]
     cells = trimmed.reshape(rows, block, cols, block, 3).mean(axis=(1, 3))
     return cells.astype(np.float32)
-
-
-def coarse_changed_fraction(
-    baseline: Any,
-    current: Any,
-    region: tuple[int, int, int, int] = PLAYER_BLOCKED_REGION,
-) -> float:
-    """Fraction of coarse center-crop cells whose mean RGB moved more than walk-cycle noise."""
-    ga = _coarse_grid(_as_rgb(baseline), region)
-    gb = _coarse_grid(_as_rgb(current), region)
-    if ga is None or gb is None or ga.shape != gb.shape:
-        return 0.0
-    delta = np.abs(ga - gb)
-    changed = np.any(delta > BLOCKED_CELL_TOLERANCE, axis=-1)
-    count = int(changed.size)
-    if count == 0:
-        return 0.0
-    return float(np.count_nonzero(changed) / count)
 
 
 def coarse_mean_abs(
