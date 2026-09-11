@@ -14,10 +14,10 @@ NATIVE_SIZE = (NATIVE_WIDTH, NATIVE_HEIGHT)
 # Valid joypad names (unchanged).
 BUTTONS = frozenset({"a", "b", "start", "select", "up", "down", "left", "right"})
 
-# Caps (raised from 30 steps / 120 hold-frames).
+# Caps (raised for hour-scale sessions: 21600 frames ≈ 6 min at 1x).
 MAX_INPUT_STEPS = 500
-MAX_HOLD_FRAMES = 3600
-MAX_FRAMES_PER_CALL = 3600
+MAX_HOLD_FRAMES = 21600
+MAX_FRAMES_PER_CALL = 21600
 MAX_GAP_FRAMES = 180
 MAX_UNTIL_EVAL_INTERVAL = 15
 MIN_UNTIL_EVAL_INTERVAL = 1
@@ -58,6 +58,8 @@ STOP_REASONS = frozenset(
         "idle_timeout",
         "blocked",
         "fade",
+        "overworld",
+        "cap",
     }
 )
 PUBLIC_STOPPED_REASONS = frozenset(
@@ -70,22 +72,32 @@ PUBLIC_STOPPED_REASONS = frozenset(
         "blocked",
         "max_frames",
         "timeout",
+        "overworld",
+        "cap",
     }
 )
 PUBLIC_INTENTS = frozenset(
-    {"advance_text", "run_away", "battle_turn", "skip_intro", "enter_door"}
+    {
+        "advance_text",
+        "run_away",
+        "battle_turn",
+        "battle_until_overworld",
+        "skip_intro",
+        "enter_door",
+    }
 )
 PUBLIC_KEYFRAME_MIN_FRAMES = 24
-# Mash / directional hold at or above this many planned frames pack a looping GIF.
+# Mash / directional hold at or above this many planned frames may pack a GIF
+# when the caller opts in with media=video. Not a default observation.
 LONG_ACTION_FRAMES = 30
 # Public single D-pad with frames omitted: walk hold (not a one-tile tap).
-PUBLIC_DPAD_HOLD_FRAMES = 240
+PUBLIC_DPAD_HOLD_FRAMES = 1800
 
-# Defaults (breaking vs the previous 1x / 5-minute / native-PNG path).
+# Defaults (long-run / cheap-media: uncapped, native PNG, 3-hour idle).
 DEFAULT_EMULATION_SPEED = 0  # uncapped; pyboy.set_emulation_speed(0)
-DEFAULT_SCREENSHOT_SCALE = 4  # nearest-neighbor integer upscale
+DEFAULT_SCREENSHOT_SCALE = 1  # native 160x144
 DEFAULT_SCREENSHOT_MODE = "final"
-DEFAULT_IDLE_TIMEOUT_SECONDS = 2700  # 45 minutes
+DEFAULT_IDLE_TIMEOUT_SECONDS = 10800  # 3 hours
 DEFAULT_UNTIL_EVAL_INTERVAL = 4
 DEFAULT_UNTIL_THRESHOLD = 0.08
 DEFAULT_STABLE_FRAMES = 12
@@ -99,8 +111,12 @@ DEFAULT_MASH_RELEASE_FRAMES = 4
 PUBLIC_MASH_PRESS_FRAMES = 12
 PUBLIC_MASH_RELEASE_FRAMES = 8
 DEFAULT_GAP_FRAMES = 0
-DEFAULT_CALL_TIMEOUT_SECONDS = 20.0
-MAX_CALL_TIMEOUT_SECONDS = 70.0
+DEFAULT_CALL_TIMEOUT_SECONDS = 90.0
+MAX_CALL_TIMEOUT_SECONDS = 180.0
+# off/image: one native 160x144 PNG. video: GIF packing allowed.
+MEDIA_MODES = frozenset({"off", "image", "video"})
+DEFAULT_MEDIA = "image"
+DEFAULT_INPUT_LOG_NAME = "input_log.jsonl"
 
 # Named hash boxes in native 160x144 space (inclusive origin, exclusive of x+w / y+h).
 DEFAULT_REGION = (0, 0, NATIVE_WIDTH, NATIVE_HEIGHT)
@@ -126,9 +142,9 @@ PUBLIC_MASH_ABORT_GAP_FRAMES = 12
 # Luminance std below this ≈ solid fade / black / white (not a stable room).
 UNIFORM_LUMA_STD_MAX = 6.0
 
-# Command wait is slightly above the engine wall-clock so the engine can
-# return stop_reason=call_timeout instead of raising TimeoutError.
-INPUT_COMMAND_TIMEOUT_SECONDS = DEFAULT_CALL_TIMEOUT_SECONDS + 5.0
+# Command wait covers a default long hold; SessionManager still raises this
+# to call_timeout_seconds + slack when the engine budget is larger.
+INPUT_COMMAND_TIMEOUT_SECONDS = 120.0
 
 # Keys that must never appear in tool JSON (case-insensitive substring check
 # on the flattened key path). Framebuffer hashes / classifiers / PNGs are OK.

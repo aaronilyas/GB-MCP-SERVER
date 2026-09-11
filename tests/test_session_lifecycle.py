@@ -93,14 +93,17 @@ def test_save_battery_writes_snapshot_and_keeps_session_running(
     assert sent["sent"] is True
 
 
-def test_default_idle_timeout_is_2700(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(config, "IDLE_TIMEOUT_SECONDS", 2700)
+def test_default_idle_timeout_is_10800(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gb_mcp.emulator.play_limits import DEFAULT_IDLE_TIMEOUT_SECONDS
+
+    assert DEFAULT_IDLE_TIMEOUT_SECONDS == 10800
+    monkeypatch.setattr(config, "IDLE_TIMEOUT_SECONDS", 10800)
     manager = SessionManager(
         backend=FakeInstanceBackend(FakePyBoy),
         idle_timeout_seconds=None,
     )
     try:
-        assert manager._idle_timeout() == 2700
+        assert manager._idle_timeout() == 10800
     finally:
         manager.shutdown()
 

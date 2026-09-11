@@ -14,6 +14,7 @@ from gb_mcp.emulator.input_schema import (
     PlayInput,
     parse_play_args,
     parse_screenshot_mode,
+    parse_screenshot_scale,
     play_input_from_args,
 )
 from gb_mcp.emulator.loop import shape_public_status
@@ -120,33 +121,39 @@ def _screenshot_entries(pngs: list[bytes]) -> list[dict[str, Any]]:
     ]
 
 
-def _final_scaled_png(pngs: list[bytes], native: list[bytes]) -> bytes | None:
-    """Prefer the last scaled preview; fall back to 4× of the final native LCD."""
+def _final_image_png(pngs: list[bytes], native: list[bytes]) -> bytes | None:
+    """Last preview PNG (already at the requested scale) or last native LCD."""
     if pngs:
         return pngs[-1]
-    if not native:
-        return None
-    try:
-        from gb_mcp.emulator.vision import encode_png, scale_nearest
-        from PIL import Image as PILImage
-        import io
-
-        image = PILImage.open(io.BytesIO(native[-1])).convert("RGB")
-        return encode_png(scale_nearest(image, 4))
-    except Exception:
+    if native:
         return native[-1]
+    return None
 
 
 def _public_screenshot_list(
-    native: list[bytes], meta: list[dict[str, Any]] | None
+    native: list[bytes],
+    meta: list[dict[str, Any]] | None,
+    *,
+    mode: str = "final",
 ) -> list[dict[str, Any]]:
-    """One final native frame by default; optional interrupt if it differs."""
+    """One final native frame by default; richer lists for keyframes/all."""
     if not native:
         return []
     kinds: list[str] = []
     if isinstance(meta, list) and meta:
         kinds = [str(item.get("kind") or "") for item in meta]
     entries = _screenshot_entries(native)
+    if mode in {"keyframes", "all"}:
+        out: list[dict[str, Any]] = []
+        for index, entry in enumerate(entries[:MAX_SCREENSHOT_ALL]):
+            labeled = dict(entry)
+            kind = kinds[index] if index < len(kinds) else ""
+            if index == len(entries) - 1:
+                labeled["kind"] = kind or "final"
+            else:
+                labeled["kind"] = kind or "keyframe"
+            out.append(labeled)
+        return out
     if len(entries) == 1:
         entries[0]["kind"] = "final"
         return entries
@@ -176,15 +183,15 @@ def format_play_tool_result(
     """Shape an engine send_input dict into the MCP play return.
 
     Public JSON gets native 160x144 ``screenshots`` of the **final** LCD (plus
-    an optional interrupt frame). If the engine attached a GIF (long mash/hold),
-    the MCP Image is that GIF even when the caller omitted ``media="video"`` or
-    passed ``media="image"``. Short taps stay a PNG of the last frame — never
-    an early keyframe. Internal hashes / paths stay stripped.
+    an optional interrupt frame). A GIF is attached only when the engine packed
+    one (``media=video``). Default observation is one native PNG of the last
+    frame — never an early keyframe. Internal hashes / paths stay stripped.
     """
     pngs = _as_png_list(result.get("pngs"))
     gif = result.get("gif")
     native = _native_pngs(result)
     shot_meta = result.get("screenshots")
+    mode = str(result.get("screenshot_mode") or "final")
     result.pop("pngs", None)
     result.pop("gif", None)
     result.pop("gifs", None)
@@ -195,7 +202,9 @@ def format_play_tool_result(
     status = _public(result)
     if status.get("ok") and native:
         status["screenshots"] = _public_screenshot_list(
-            native, shot_meta if isinstance(shot_meta, list) else None
+            native,
+            shot_meta if isinstance(shot_meta, list) else None,
+            mode=mode,
         )
     if not result.get("sent") and result.get("error"):
         status.pop("screenshots", None)
@@ -205,7 +214,7 @@ def format_play_tool_result(
     if isinstance(gif, (bytes, bytearray)) and gif:
         image = Image(data=bytes(gif), format="gif")
     else:
-        final_png = _final_scaled_png(pngs, native)
+        final_png = _final_image_png(pngs, native)
         if final_png:
             image = Image(data=final_png, format="png")
     if image is None:
@@ -337,13 +346,14 @@ def play(
     intent: str | None = None,
     media: str | None = None,
     screenshot_mode: str | None = None,
+    screenshot_scale: int | None = None,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
     """Press buttons on the current session and look at the returned LCD.
 
     Long directional ``frames`` become a hold that aborts on battle, text,
     menu, fade, or a blocked wall. Dialogue uses mash or ``intent=advance_text``.
-    Long mash/hold returns a GIF of the action; a short tap stays a PNG.
-    ``media="video"`` is accepted; ``media="image"`` does not suppress the GIF.
+    Default observation is one native 160x144 PNG of the last LCD. Pass
+    ``media="video"`` for a GIF; ``screenshot_scale`` 2/3/4 upscales.
     """
     bound = require_email()
     if isinstance(bound, dict):
@@ -378,6 +388,11 @@ def play(
             play_input = replace(
                 play_input,
                 screenshot_mode=parse_screenshot_mode(screenshot_mode),
+            )
+        if screenshot_scale is not None:
+            play_input = replace(
+                play_input,
+                screenshot_scale=parse_screenshot_scale(screenshot_scale),
             )
     except ValueError as exc:
         return _public(

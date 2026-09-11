@@ -21,10 +21,7 @@ from gb_mcp.emulator.backend import (
     _dead_message,
 )
 from gb_mcp.emulator.loop import PyBoyFactory, _state_path_for_rom, rewrite_host_email
-from gb_mcp.emulator.play_limits import (
-    DEFAULT_EMULATION_SPEED,
-    INPUT_COMMAND_TIMEOUT_SECONDS,
-)
+from gb_mcp.emulator.play_limits import INPUT_COMMAND_TIMEOUT_SECONDS
 from gb_mcp.storage.roms import _describe_subdirectory
 
 _SUBMIT_OPS = frozenset({"input", "ping", "save", "discard_state"})
@@ -364,7 +361,7 @@ class SessionManager:
             else self._idle_timeout()
         )
         speed = (
-            DEFAULT_EMULATION_SPEED if emulation_speed is None else int(emulation_speed)
+            int(config.EMULATION_SPEED) if emulation_speed is None else int(emulation_speed)
         )
         with self._lock:
             current = self._by_email.get(email)

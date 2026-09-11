@@ -124,7 +124,7 @@ class DockerInstanceBackend:
             "POST",
             "/input",
             body,
-            timeout=int(timeout) + 5,
+            timeout=int(timeout) + 15,
         )
         if remote.get("error") and not remote.get("pngs_b64") and not remote.get("pngs"):
             raise RuntimeError(str(remote["error"]))
@@ -278,6 +278,10 @@ def play_create_args(
         f"GB_PYBOY_IDLE_TIMEOUT_SECONDS={int(idle_timeout_seconds)}",
         "-e",
         f"GB_PYBOY_EMULATION_SPEED={int(emulation_speed)}",
+        "-e",
+        f"GB_MCP_MEDIA={config.mcp_media()}",
+        "-e",
+        f"GB_MCP_INPUT_LOG={config.input_log_path_setting()}",
         "-e",
         f"GB_INSTANCE_RESTORE_STATE={'1' if restore_state else '0'}",
         "-e",

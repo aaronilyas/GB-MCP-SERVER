@@ -153,16 +153,16 @@ def boot(
 @mcp.tool(
     name="play",
     description=(
-        "Press Game Boy buttons and look at the returned image. Long mash/hold "
-        "returns a GIF of the action plus a final native PNG; a short tap stays "
-        "a PNG of the last LCD. After boot, do not pass email or id. Omit frames "
-        "on a single D-pad to hold-walk (default 240); pass frames=16 to tap. "
+        "Press Game Boy buttons and look at the returned image (native 160x144 "
+        "PNG of the last LCD). After boot, do not pass email or id. Omit frames "
+        "on a single D-pad to hold-walk (default 1800); pass frames=16 to tap. "
         "Holds abort on combat HUD, text, menu, fade, or blocked. buttons=[] "
         "waits. Optional frames, gap, mash, steps, until "
         "(battle|textbox|menu|stable|fade|blocked|overworld), until_polarity "
         "(appears|disappears), intent "
-        "(advance_text|run_away|battle_turn|skip_intro|enter_door), "
-        "and media (image|video)."
+        "(advance_text|run_away|battle_turn|battle_until_overworld|skip_intro|"
+        "enter_door), media (off|image|video; do not request GIFs unless video), "
+        "screenshot_mode, and screenshot_scale (1–4, default 1)."
     ),
 )
 def play(
@@ -181,7 +181,7 @@ def play(
         Field(
             default=None,
             description=(
-                "Hold or wait frames. Omit on a single D-pad to walk (default 240 "
+                "Hold or wait frames. Omit on a single D-pad to walk (default 1800 "
                 "hold). Pass frames=16 to tap one tile. A/B default 16. Holds abort "
                 "on combat HUD, text, menu, fade, or blocked."
             ),
@@ -232,8 +232,9 @@ def play(
         Field(
             default=None,
             description=(
-                "advance_text, run_away, battle_turn, skip_intro, or enter_door. "
-                "Composed from buttons and until; LCD-driven, not memory."
+                "advance_text, run_away, battle_turn, battle_until_overworld, "
+                "skip_intro, or enter_door. Composed from buttons and until; "
+                "LCD-driven, not memory."
             ),
         ),
     ] = None,
@@ -242,9 +243,27 @@ def play(
         Field(
             default=None,
             description=(
-                "image or video. Long mash/hold returns a GIF by default; "
-                "short taps stay a PNG. media=video is still valid."
+                "off, image, or video. Default image: one native PNG of the last "
+                "LCD, no GIF. media=video opts in to a GIF. Do not request GIFs "
+                "or scale-4 shots for ordinary play."
             ),
+        ),
+    ] = None,
+    screenshot_mode: Annotated[
+        str | None,
+        Field(
+            default=None,
+            description=(
+                "final (default), interrupt_and_final, keyframes, or all. "
+                "Omit for one last-frame PNG."
+            ),
+        ),
+    ] = None,
+    screenshot_scale: Annotated[
+        int | None,
+        Field(
+            default=None,
+            description="PNG upscale 1, 2, 3, or 4. Default 1 (native 160x144).",
         ),
     ] = None,
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
@@ -258,6 +277,8 @@ def play(
         until_polarity=until_polarity,
         intent=intent,
         media=media,
+        screenshot_mode=screenshot_mode,
+        screenshot_scale=screenshot_scale,
     )
 
 

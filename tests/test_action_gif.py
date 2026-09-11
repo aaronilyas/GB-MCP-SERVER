@@ -85,7 +85,7 @@ def test_strip_keeps_gif_bytes() -> None:
     assert "wram" not in clean
 
 
-def test_mash_execute_returns_one_png_and_gif() -> None:
+def test_mash_execute_default_is_png_only() -> None:
     pyboy = FakePyBoy(Path("dummy.gb"))
     result = execute_play_command(
         pyboy,
@@ -99,6 +99,25 @@ def test_mash_execute_returns_one_png_and_gif() -> None:
     pngs = result.get("pngs") or []
     assert len(pngs) == 1
     assert pngs[0].startswith(PNG_MAGIC)
+    assert result.get("gif") is None
+    assert result.get("macro") == "mash"
+
+
+def test_mash_execute_returns_gif_when_media_video() -> None:
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    result = execute_play_command(
+        pyboy,
+        {
+            "macro": "mash",
+            "mash_button": "a",
+            "max_frames": 40,
+            "screenshot_scale": 1,
+            "media": "video",
+        },
+    )
+    pngs = result.get("pngs") or []
+    assert len(pngs) == 1
+    assert pngs[0].startswith(PNG_MAGIC)
     gif = result.get("gif")
     assert isinstance(gif, (bytes, bytearray))
     assert bytes(gif).startswith(GIF_MAGIC)
@@ -107,7 +126,7 @@ def test_mash_execute_returns_one_png_and_gif() -> None:
     assert result.get("macro") == "mash"
 
 
-def test_long_hold_execute_returns_one_png_and_gif() -> None:
+def test_long_hold_execute_default_is_png_only() -> None:
     pyboy = FakePyBoy(Path("dummy.gb"))
     result = execute_play_command(
         pyboy,
@@ -117,6 +136,25 @@ def test_long_hold_execute_returns_one_png_and_gif() -> None:
             "max_frames": 40,
             "screenshot_scale": 1,
             "disable_default_hold_abort": True,
+        },
+    )
+    pngs = result.get("pngs") or []
+    assert len(pngs) == 1
+    assert pngs[0].startswith(PNG_MAGIC)
+    assert result.get("gif") is None
+
+
+def test_long_hold_execute_returns_gif_when_media_video() -> None:
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    result = execute_play_command(
+        pyboy,
+        {
+            "macro": "hold",
+            "buttons": ["up"],
+            "max_frames": 40,
+            "screenshot_scale": 1,
+            "disable_default_hold_abort": True,
+            "media": "video",
         },
     )
     pngs = result.get("pngs") or []
@@ -139,7 +177,49 @@ def test_short_tap_stays_png_only() -> None:
     assert pngs[0].startswith(PNG_MAGIC)
     assert result.get("gif") is None
     assert result.get("screenshot_mode") == "final"
-    assert wants_action_gif(type("P", (), {"macro": "buttons", "planned_frames": 1, "max_frames": 1})()) is False
+    assert wants_action_gif(type("P", (), {"macro": "buttons", "planned_frames": 1, "max_frames": 1, "extra": {}})()) is False
+
+
+def test_wants_action_gif_false_unless_media_video() -> None:
+    hold = type(
+        "P",
+        (),
+        {
+            "macro": "hold",
+            "planned_frames": 1800,
+            "max_frames": 1800,
+            "extra": {"media": "image"},
+        },
+    )()
+    assert wants_action_gif(hold) is False
+    hold_off = type(
+        "P",
+        (),
+        {
+            "macro": "hold",
+            "planned_frames": 1800,
+            "max_frames": 1800,
+            "extra": {"media": "off"},
+        },
+    )()
+    assert wants_action_gif(hold_off) is False
+    hold_video = type(
+        "P",
+        (),
+        {
+            "macro": "hold",
+            "planned_frames": 1800,
+            "max_frames": 1800,
+            "extra": {"media": "video"},
+        },
+    )()
+    assert wants_action_gif(hold_video) is True
+    mash_plain = type(
+        "P",
+        (),
+        {"macro": "mash", "planned_frames": 400, "max_frames": 400, "extra": {}},
+    )()
+    assert wants_action_gif(mash_plain) is False
 
 
 def test_instance_server_forwards_all_native_pngs() -> None:
@@ -159,18 +239,16 @@ def test_instance_server_forwards_all_native_pngs() -> None:
     assert preview.size == (640, 576)
 
 
-def test_instance_server_encodes_at_most_one_png_and_gif() -> None:
+def test_instance_server_encodes_at_most_one_png_without_inventing_gif() -> None:
     module = _instance_server()
     frames = [_png((i, 0, 80)) for i in range(30)]
     encoded = module.encode_input_media({"pngs": frames, "sent": True})
     assert "pngs" not in encoded
     assert len(encoded["pngs_b64"]) == 1
-    assert len(encoded["pngs_b64"]) <= 1
     png = base64.b64decode(encoded["pngs_b64"][0])
     assert png.startswith(PNG_MAGIC)
     assert png == frames[-1]
-    gif = base64.b64decode(encoded["gif_b64"])
-    assert gif.startswith(GIF_MAGIC)
+    assert not encoded.get("gif_b64")
 
 
 def test_instance_server_passes_through_existing_gif() -> None:
@@ -266,7 +344,7 @@ def _assert_mcp_image_is_final(formatted, *, final_png: bytes, gif: bytes | None
         assert list(shown.getdata())[0] == list(final.getdata())[0]
 
 
-def test_public_mash_returns_gif_without_media_video() -> None:
+def test_public_mash_returns_png_without_media_video() -> None:
     from PIL import Image as PILImage
 
     pyboy = FakePyBoy(Path("dummy.gb"))
@@ -283,21 +361,22 @@ def test_public_mash_returns_gif_without_media_video() -> None:
     assert play.macro == "mash"
     assert play.extra.get("media") == "image"
     result = execute_play_command(pyboy, play)
-    gif = result.get("gif")
-    assert isinstance(gif, (bytes, bytearray))
-    assert bytes(gif).startswith(b"GIF89a")
+    assert result.get("gif") is None
     natives = result.get("pngs_native") or []
     assert len(natives) == 1
     pngs = result.get("pngs") or []
     assert len(pngs) == 1
     formatted = format_play_tool_result(result)
-    _assert_gif_image(formatted)
-    _assert_mcp_image_is_final(formatted, final_png=pngs[0], gif=bytes(gif))
+    assert isinstance(formatted, list)
+    assert formatted[1]._format == "png"
+    _assert_mcp_image_is_final(formatted, final_png=pngs[0], gif=None)
     status = formatted[0]
     assert len(status.get("screenshots") or []) <= 1
+    shown = PILImage.open(io.BytesIO(bytes(formatted[1].data)))
+    assert shown.size == (NATIVE_WIDTH, NATIVE_HEIGHT)
 
 
-def test_public_long_hold_returns_gif_without_media_video() -> None:
+def test_public_long_hold_returns_png_without_media_video() -> None:
     from dataclasses import replace
 
     pyboy = FakePyBoy(Path("dummy.gb"))
@@ -315,20 +394,40 @@ def test_public_long_hold_returns_gif_without_media_video() -> None:
     assert play.extra.get("media") == "image"
     play = replace(play, disable_default_hold_abort=True, apply_default_hold_abort=False)
     result = execute_play_command(pyboy, play)
-    gif = result.get("gif")
-    assert isinstance(gif, (bytes, bytearray))
-    assert bytes(gif).startswith(b"GIF89a")
+    assert result.get("gif") is None
     natives = result.get("pngs_native") or []
     assert len(natives) == 1
     pngs = result.get("pngs") or []
     assert len(pngs) == 1
     formatted = format_play_tool_result(result)
+    assert isinstance(formatted, list)
+    assert formatted[1]._format == "png"
+    _assert_mcp_image_is_final(formatted, final_png=pngs[0], gif=None)
+
+
+def test_public_long_hold_returns_gif_with_media_video() -> None:
+    from dataclasses import replace
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        import numpy as np
+
+        frame = np.zeros((NATIVE_HEIGHT, NATIVE_WIDTH, 3), dtype=np.uint8)
+        frame[:, :, 0] = min(255, int(ticks) * 4)
+        return PILImage.fromarray(frame)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(
+        parse_play_args({"buttons": ["up"], "frames": 40, "media": "video"})
+    )
+    play = replace(play, disable_default_hold_abort=True, apply_default_hold_abort=False)
+    result = execute_play_command(pyboy, play)
+    gif = result.get("gif")
+    assert isinstance(gif, (bytes, bytearray))
+    assert bytes(gif).startswith(b"GIF89a")
+    formatted = format_play_tool_result(result)
     _assert_gif_image(formatted)
-    _assert_mcp_image_is_final(formatted, final_png=pngs[0], gif=bytes(gif))
-    # GIF last frame matches final; first keyframe is earlier (not the baseline-only image).
-    first = PILImage.open(io.BytesIO(bytes(gif))).convert("RGB")
-    last = _gif_last_frame_rgb(bytes(gif))
-    assert list(first.getdata())[0] != list(last.getdata())[0]
 
 
 def test_public_short_tap_stays_png_only() -> None:
@@ -382,11 +481,10 @@ def test_public_mash_pulses_a_stops_when_box_gone_and_releases() -> None:
     assert max_held < result["frames_advanced"]
     assert pyboy._pressed == set()
     assert pyboy.releases
-    gif = result.get("gif")
-    assert isinstance(gif, (bytes, bytearray))
-    assert bytes(gif).startswith(GIF_MAGIC)
+    assert result.get("gif") is None
     formatted = format_play_tool_result(result)
-    _assert_gif_image(formatted)
+    assert isinstance(formatted, list)
+    assert formatted[1]._format == "png"
 
 
 def test_public_mash_without_textbox_waits_briefly() -> None:

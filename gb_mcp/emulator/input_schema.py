@@ -23,6 +23,7 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_MASH_BUTTON,
     DEFAULT_MASH_PRESS_FRAMES,
     DEFAULT_MASH_RELEASE_FRAMES,
+    DEFAULT_MEDIA,
     DEFAULT_REGION,
     DEFAULT_SCREENSHOT_MODE,
     DEFAULT_SCREENSHOT_SCALE,
@@ -37,6 +38,7 @@ from gb_mcp.emulator.play_limits import (
     MAX_HOLD_FRAMES,
     MAX_INPUT_STEPS,
     MAX_UNTIL_EVAL_INTERVAL,
+    MEDIA_MODES,
     MIN_UNTIL_EVAL_INTERVAL,
     NATIVE_HEIGHT,
     NATIVE_WIDTH,
@@ -322,7 +324,7 @@ def _parse_intent(value: Any) -> str | None:
     if not isinstance(value, str):
         raise ValueError(
             "intent must be 'advance_text', 'run_away', 'battle_turn', "
-            "'skip_intro', or 'enter_door'"
+            "'battle_until_overworld', 'skip_intro', or 'enter_door'"
         )
     intent = value.strip().lower()
     if not intent:
@@ -330,7 +332,7 @@ def _parse_intent(value: Any) -> str | None:
     if intent not in PUBLIC_INTENTS:
         raise ValueError(
             "intent must be 'advance_text', 'run_away', 'battle_turn', "
-            "'skip_intro', or 'enter_door'"
+            "'battle_until_overworld', 'skip_intro', or 'enter_door'"
         )
     return intent
 
@@ -401,10 +403,14 @@ def _planned_step_frames(steps: list[InputStep]) -> int:
 
 
 def call_timeout_for_speed(speed: int, planned_frames: int) -> float:
-    """Wall-clock budget. Uncapped/fast calls stay near 20s; 1x can use more."""
-    if speed <= 0:
-        return DEFAULT_CALL_TIMEOUT_SECONDS
-    seconds = planned_frames / (60.0 * speed) + 5.0
+    """Wall-clock budget covering planned_frames at speed, capped at MAX.
+
+    Uncapped (speed 0) is budgeted as 1x so a long hold is not clamped to a
+    short RPC timeout.
+    """
+    rate = 60.0 * speed if speed > 0 else 60.0
+    frames = max(0, int(planned_frames))
+    seconds = frames / rate + 5.0
     return min(MAX_CALL_TIMEOUT_SECONDS, max(DEFAULT_CALL_TIMEOUT_SECONDS, seconds))
 
 
@@ -615,7 +621,7 @@ PUBLIC_UNTIL_ALIASES: dict[str, tuple[str, str | None]] = {
     "clear_text": ("textbox", "disappears"),
     "overworld": ("overworld", None),
 }
-PUBLIC_MEDIA = frozenset({"image", "video"})
+PUBLIC_MEDIA = MEDIA_MODES
 PUBLIC_UNTIL_POLARITIES = CLASSIFIER_POLARITIES
 _DIRECTION_BUTTONS = frozenset({"up", "down", "left", "right"})
 _AB_BUTTONS = frozenset({"a", "b"})
@@ -725,14 +731,23 @@ def _public_screenshot_mode(*, media: str, macro: str, planned: int) -> str:
     return DEFAULT_SCREENSHOT_MODE
 
 
+def _default_public_media() -> str:
+    try:
+        from gb_mcp.config import mcp_media
+
+        return mcp_media()
+    except Exception:
+        return DEFAULT_MEDIA
+
+
 def _parse_public_media(value: Any) -> str:
     if value is None:
-        return "image"
+        return _default_public_media()
     if not isinstance(value, str):
-        raise ValueError("media must be 'image' or 'video'")
+        raise ValueError("media must be 'off', 'image', or 'video'")
     media = value.strip().lower()
     if media not in PUBLIC_MEDIA:
-        raise ValueError("media must be 'image' or 'video'")
+        raise ValueError("media must be 'off', 'image', or 'video'")
     return media
 
 

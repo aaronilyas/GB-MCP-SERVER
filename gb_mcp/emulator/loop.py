@@ -101,6 +101,7 @@ PUBLIC_STATUS_KEYS = frozenset(
         "player_moved",
         "textbox_complete",
         "ocr_text",
+        "emulation_speed",
     }
 )
 
@@ -192,6 +193,10 @@ def _public_stopped_reason(internal: dict[str, Any]) -> str | None:
         return "blocked"
     if stop == "fade":
         return "fade"
+    if stop == "overworld":
+        return "overworld"
+    if stop == "cap":
+        return "cap"
     flags = _classifier_flags(internal)
     if stop in {"classifier", "default_hold_abort"}:
         if flags.get("textbox_likely") is True:
@@ -249,10 +254,10 @@ def shape_public_status(internal: dict[str, Any]) -> dict[str, Any]:
     Always includes ``ok``, ``frames``, ``stopped``, and ``game``. Adds
     ``looks_like`` when a classifier is true (textbox > battle > menu > fade)
     and ``error`` on failure. Optional ``stopped_reason``, ``player_moved``,
-    ``textbox_complete``, and ``ocr_text`` are LCD-derived. Builds a new dict
-    so hashes, paths, idle timers, classifier objects, and internal screenshot
-    metadata cannot leak through. Public ``screenshots`` (native PNG base64)
-    are attached by the play tool after this shaper runs.
+    ``textbox_complete``, ``ocr_text``, and ``emulation_speed`` are LCD-derived.
+    Builds a new dict so hashes, paths, idle timers, classifier objects, and
+    internal screenshot metadata cannot leak through. Public ``screenshots``
+    (native PNG base64) are attached by the play tool after this shaper runs.
     """
     payload: dict[str, Any] = {
         "ok": _public_ok(internal),
@@ -260,6 +265,9 @@ def shape_public_status(internal: dict[str, Any]) -> dict[str, Any]:
         "stopped": _public_stopped(internal),
         "game": _public_game(internal),
     }
+    speed = internal.get("emulation_speed")
+    if isinstance(speed, int) and not isinstance(speed, bool):
+        payload["emulation_speed"] = speed
     looks_like = _public_looks_like(internal)
     if looks_like is not None:
         payload["looks_like"] = looks_like

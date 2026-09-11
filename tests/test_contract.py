@@ -64,7 +64,6 @@ def test_how_to_play_teaches_gif_blocked_mash_and_intent() -> None:
     assert len(text.strip()) <= HOW_TO_PLAY_MAX_CHARS
     assert "GIF" in text
     assert "blocked" in text
-    assert "Mash pulses" in text
     assert "intent" in text
     assert "until_polarity" in text or "textbox_end" in text
     lower = text.lower()
@@ -73,13 +72,18 @@ def test_how_to_play_teaches_gif_blocked_mash_and_intent() -> None:
     for name in _TOOLS:
         assert name in text, name
     assert "omit frames" in lower
-    assert "240" in text
+    assert "1800" in text
     assert "frames=16" in text
     assert "skip_intro" in text
     assert "enter_door" in text
-    assert "last screenshot" in lower
+    assert "advance_text" in text
+    assert "battle_until_overworld" in text or "battle_turn" in text
+    assert "last" in lower and "image" in lower
     assert "overworld" in lower
     assert "fade" in lower
+    assert "do not request gif" in lower or "do not request gifs" in lower
+    assert "diaries" in lower or "frame-by-frame" in lower
+    assert "never hold a" in lower
 
 
 def test_how_to_play_omits_game_specific_needles() -> None:

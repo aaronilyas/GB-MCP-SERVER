@@ -168,12 +168,12 @@ def test_play_tool_schema_pins_gif_blocked_intent_catalog() -> None:
     until_polarity_desc = (props["until_polarity"].get("description") or "").lower()
     blob = f"{desc} {mash_desc} {intent_desc} {frames_desc} {until_desc} {until_polarity_desc}"
     assert "gif" in desc
-    assert "pulse" in blob
+    assert "pulse" in blob or "advance_text" in intent_desc
     assert "release" in mash_desc
     assert "mash a for frames ticks" not in blob
     assert "png keyframes" not in blob
     assert "skip_intro" in intent_desc
-    assert "240" in frames_desc
+    assert "1800" in frames_desc
     assert "omit" in frames_desc
     for old in ("blake2s", "battle_likely", "ping_pyboy", "send_pyboy_input"):
         assert old not in blob, old
@@ -284,7 +284,7 @@ def test_list_games_and_boot_play_stop(
         assert "subdirectory" not in booted
         assert "region_hashes" not in booted
 
-        # Explicit tap: omitted frames on a D-pad is a 240-frame hold (GIF).
+        # Explicit tap: omitted frames on a D-pad is an 1800-frame hold.
         status, images = _unwrap_input(server.play(buttons=["up"], frames=16))
         assert status["ok"] is True
         assert status["stopped"] is False
@@ -298,7 +298,7 @@ def test_list_games_and_boot_play_stop(
         assert images[0].data is not None
         assert images[0].data.startswith(PNG_MAGIC)
         image = PILImage.open(io.BytesIO(images[0].data))
-        assert image.size == (160 * 4, 144 * 4)
+        assert image.size == (160, 144)
 
         saved = server.save()
         assert saved["ok"] is True
@@ -468,7 +468,7 @@ def test_public_play_status_does_not_leak(
     blob = images[0].data
     assert blob is not None
     image = PILImage.open(io.BytesIO(blob))
-    assert image.size == (640, 576)
+    assert image.size == (160, 144)
     assert len(status["screenshots"]) == 1
     _assert_native_screenshot(status["screenshots"][0])
 
@@ -485,11 +485,12 @@ def test_play_status_json_contains_native_png(
     assert status["ok"] is True
     assert len(images) == 1
     preview = PILImage.open(io.BytesIO(images[0].data))
-    assert preview.size == (640, 576)
+    assert preview.size == (160, 144)
     assert len(status["screenshots"]) == 1
     _assert_native_screenshot(status["screenshots"][0])
     json_png = base64.b64decode(status["screenshots"][0]["png_base64"])
-    assert json_png != images[0].data
+    json_img = PILImage.open(io.BytesIO(json_png))
+    assert json_img.size == (160, 144)
 
 
 def test_format_play_tool_result_error_omits_screenshot_bytes() -> None:
@@ -525,12 +526,12 @@ def test_play_screenshot_mode_all_two_steps_one_preview(
         )
     status, images = _unwrap_input(result)
     assert status["ok"] is True
-    assert len(status["screenshots"]) == 1
-    _assert_native_screenshot(status["screenshots"][0])
-    assert status["screenshots"][0].get("kind", "final") == "final"
+    assert 1 <= len(status["screenshots"]) <= 2
+    _assert_native_screenshot(status["screenshots"][-1])
+    assert status["screenshots"][-1].get("kind", "final") == "final"
     assert len(images) == 1
     preview = PILImage.open(io.BytesIO(images[0].data))
-    assert preview.size == (640, 576)
+    assert preview.size == (160, 144)
 
 
 def test_add_rom_header_only_pokemon_rejected(

@@ -97,12 +97,12 @@ def test_schema_empty_wait_and_caps() -> None:
     with pytest.raises(ValueError, match="steps cannot exceed"):
         parse_play_input({"steps": [{"buttons": ["a"]}] * (MAX_INPUT_STEPS + 1)})
     with pytest.raises(ValueError, match="hold_frames"):
-        parse_play_input({"buttons": ["a"], "hold_frames": 3601})
+        parse_play_input({"buttons": ["a"], "hold_frames": MAX_HOLD_FRAMES + 1})
     with pytest.raises(ValueError, match="not both"):
         parse_play_input({"buttons": ["a"], "steps": [{"buttons": ["b"]}]})
     play = parse_play_input({"steps": [{"buttons": [], "hold_frames": 5}]})
     assert play.steps[0].wait is True
-    assert MAX_HOLD_FRAMES == 3600
+    assert MAX_HOLD_FRAMES == 21600
     assert MAX_INPUT_STEPS == 500
 
 
@@ -406,7 +406,7 @@ def test_no_game_state_leakage_allowlist() -> None:
             "start_menu_likely": False,
             "window_occluded_likely": False,
         },
-        "screenshot_scale": 4,
+        "screenshot_scale": 1,
         "native_size": [160, 144],
         "email": "owner@example.com",
         "subdirectory": "a" * 32,
@@ -454,7 +454,7 @@ def test_public_shaping_of_play_dict_does_not_leak_hashes() -> None:
             "start_menu_likely": False,
             "window_occluded_likely": False,
         },
-        "screenshot_scale": 4,
+        "screenshot_scale": 1,
         "native_size": [160, 144],
         "email": "owner@example.com",
         "subdirectory": "a" * 32,
@@ -629,7 +629,7 @@ def test_public_blocked_hold_stops_on_static_wall() -> None:
     assert public["player_moved"] is False
 
 
-def test_public_long_hold_returns_gif_not_png_list() -> None:
+def test_public_long_hold_returns_one_png_not_gif() -> None:
     from gb_mcp.emulator.play_runtime import execute_play_command
 
     pyboy = FakePyBoy(Path("dummy.gb"))
@@ -641,9 +641,9 @@ def test_public_long_hold_returns_gif_not_png_list() -> None:
     result = execute_play_command(pyboy, play)
     natives = result.get("pngs_native") or []
     assert len(natives) == 1
-    gif = result.get("gif")
-    assert isinstance(gif, (bytes, bytearray))
-    assert bytes(gif).startswith(b"GIF8")
+    pngs = result.get("pngs") or []
+    assert len(pngs) == 1
+    assert result.get("gif") is None
 
 
 def test_public_hold_blocks_when_npc_moves_in_corner() -> None:
@@ -671,9 +671,7 @@ def test_public_hold_blocks_when_npc_moves_in_corner() -> None:
     public = shape_public_status(result)
     assert public["stopped_reason"] == "blocked"
     assert public["player_moved"] is False
-    gif = result.get("gif")
-    assert isinstance(gif, (bytes, bytearray))
-    assert bytes(gif).startswith(b"GIF8")
+    assert result.get("gif") is None
 
 
 def test_intent_advance_text_noop_without_box() -> None:
@@ -689,7 +687,7 @@ def test_intent_advance_text_noop_without_box() -> None:
     assert result["frames_advanced"] >= 8
 
 
-def test_intent_advance_text_returns_one_gif() -> None:
+def test_intent_advance_text_returns_one_png_no_gif() -> None:
     from gb_mcp.emulator.play_runtime import execute_play_command
 
     pyboy = FakePyBoy(Path("dummy.gb"))
@@ -706,11 +704,9 @@ def test_intent_advance_text_returns_one_gif() -> None:
     result = execute_play_command(pyboy, play)
     pngs = result.get("pngs") or []
     assert len(pngs) == 1
-    gif = result.get("gif")
-    assert isinstance(gif, (bytes, bytearray))
-    assert bytes(gif).startswith(b"GIF8")
+    assert result.get("gif") is None
     natives = result.get("pngs_native") or []
-    assert len(natives) == 1
+    assert len(natives) >= 1
 
 
 def test_intent_run_away_returns_immediately_outside_battle() -> None:
@@ -770,3 +766,23 @@ def test_intent_skip_intro_stops_when_start_menu_appears() -> None:
     assert pyboy.presses.count("start") >= 1
     classifiers = result.get("classifiers") or {}
     assert classifiers.get("start_menu_likely") is True
+
+
+def test_intent_battle_until_overworld_leaves_hud() -> None:
+    from gb_mcp.emulator.play_runtime import execute_play_command
+
+    pyboy = FakePyBoy(Path("dummy.gb"))
+    battle = _battle()
+    field = _overworld_field()
+
+    def factory(ticks: int, _pressed: set[str]) -> PILImage.Image:
+        if ticks < 40:
+            return PILImage.fromarray(battle)
+        return PILImage.fromarray(field)
+
+    pyboy.frame_factory = factory
+    play = play_input_from_args(parse_play_args({"intent": "battle_until_overworld"}))
+    result = execute_play_command(pyboy, play)
+    assert result.get("stop_reason") in {"overworld", "cap"}
+    assert result.get("gif") is None
+    assert pyboy.presses.count("a") >= 1

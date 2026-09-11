@@ -21,8 +21,6 @@ from gb_mcp.emulator.play_limits import (
     LONG_ACTION_FRAMES,
     NATIVE_SIZE,
     PUBLIC_MASH_ABORT_GAP_FRAMES,
-    PUBLIC_MASH_PRESS_FRAMES,
-    PUBLIC_MASH_RELEASE_FRAMES,
     SEND_INPUT_RESPONSE_KEYS,
 )
 from gb_mcp.emulator.vision import (
@@ -70,10 +68,18 @@ def execute_play_command(
             extra["public_mash"] = True
         if extra:
             play = replace(play, extra=extra)
+    from gb_mcp.emulator.input_log import append_play_log, frame_count
+
+    t0 = frame_count(pyboy)
     if play.intent:
         from gb_mcp.emulator.intents import execute_intent
 
-        return execute_intent(pyboy, play, session_speed=session_speed, monotonic=monotonic)
+        result = execute_intent(
+            pyboy, play, session_speed=session_speed, monotonic=monotonic
+        )
+        if pack_media:
+            append_play_log(pyboy, play, result, t0=t0)
+        return result
     play = _rewrite_public_mash_without_box(pyboy, play)
     public_mode = play.screenshot_mode
     media = str((play.extra or {}).get("media") or "image")
@@ -130,6 +136,9 @@ def execute_play_command(
             sampled_internally=sampled_internally,
             media=media,
         )
+        cleaned = strip_forbidden_keys(result)
+        append_play_log(pyboy, play, cleaned, t0=t0)
+        return cleaned
     return strip_forbidden_keys(result)
 
 
@@ -166,13 +175,7 @@ def _attach_public_ocr(result: dict[str, Any]) -> None:
 
 def _is_public_mash(play: PlayInput) -> bool:
     extra = play.extra or {}
-    if extra.get("public_mash"):
-        return True
-    return (
-        play.macro == "mash"
-        and play.mash_press_frames == PUBLIC_MASH_PRESS_FRAMES
-        and play.mash_release_frames == PUBLIC_MASH_RELEASE_FRAMES
-    )
+    return bool(extra.get("public_mash"))
 
 
 def _rewrite_public_mash_without_box(pyboy: Any, play: PlayInput) -> PlayInput:
@@ -212,7 +215,11 @@ def _rewrite_public_mash_without_box(pyboy: Any, play: PlayInput) -> PlayInput:
 
 
 def wants_action_gif(play: Any) -> bool:
-    """True for mash / long hold that should be sampled into one GIF."""
+    """True only when the caller opts in with media=video on a long mash/hold."""
+    extra = getattr(play, "extra", None) or {}
+    media = str(extra.get("media") or "image").strip().lower()
+    if media != "video":
+        return False
     if getattr(play, "macro", None) not in {"mash", "hold"}:
         return False
     planned = int(getattr(play, "planned_frames", 0) or 0)
@@ -258,12 +265,28 @@ def _apply_action_media(
     pngs = result.get("pngs") or []
     if not isinstance(pngs, list):
         pngs = [pngs]
-    # Long mash/hold pack a GIF even when the caller omitted media="video".
-    emit_gif = bool(want_gif) or media == "video"
-    keep_natives = (
-        public_screenshot_mode == "keyframes" and not sampled_internally and not emit_gif
-    )
+    emit_gif = media == "video" and bool(want_gif)
+    keep_natives = public_screenshot_mode in {"keyframes", "all"}
     if not emit_gif:
+        if keep_natives:
+            return
+        pngs = result.get("pngs") or []
+        if isinstance(pngs, list) and pngs:
+            result["pngs"] = pngs[-1:]
+            result["screenshot_count"] = 1
+        native = result.get("pngs_native")
+        if isinstance(native, list) and native:
+            last_native = native[-1]
+            if isinstance(last_native, (bytes, bytearray)) and last_native:
+                result["pngs_native"] = [bytes(last_native)]
+            else:
+                result["pngs_native"] = native[-1:]
+        shots = result.get("screenshots")
+        if isinstance(shots, list) and shots:
+            last = dict(shots[-1])
+            last["kind"] = "final"
+            result["screenshots"] = [last]
+        result["screenshot_mode"] = public_screenshot_mode or "final"
         return
     packed = pack_action_media(pngs, want_gif=True)
     gif = packed.get("gif")

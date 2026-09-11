@@ -27,6 +27,7 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_EMULATION_SPEED,
     DEFAULT_IDLE_TIMEOUT_SECONDS,
     INPUT_COMMAND_TIMEOUT_SECONDS,
+    MAX_CALL_TIMEOUT_SECONDS,
     MAX_SCREENSHOT_ALL,
 )
 from gb_mcp.gb.header import inspect_rom_playable
@@ -89,9 +90,15 @@ class Handler(BaseHTTPRequestHandler):
             if not payload.get("screenshot_mode"):
                 payload["screenshot_mode"] = "final"
             try:
+                wait = INPUT_COMMAND_TIMEOUT_SECONDS
+                raw_timeout = payload.get("call_timeout_seconds")
+                if isinstance(raw_timeout, (int, float)) and not isinstance(
+                    raw_timeout, bool
+                ):
+                    wait = max(wait, float(raw_timeout) + 15.0)
                 result = session.submit(
                     "input",
-                    timeout=INPUT_COMMAND_TIMEOUT_SECONDS,
+                    timeout=wait,
                     **payload,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -169,14 +176,7 @@ def encode_input_media(result: dict[str, Any]) -> dict[str, Any]:
         gif = None
     else:
         gif = bytes(gif)
-    if gif is None and len(pngs) > 1:
-        from gb_mcp.emulator.play_runtime import pack_action_media
-
-        media = pack_action_media(pngs, want_gif=True)
-        pngs = [bytes(item) for item in media.get("pngs") or [] if item]
-        packed_gif = media.get("gif")
-        gif = packed_gif if isinstance(packed_gif, (bytes, bytearray)) else None
-    elif len(pngs) > 1:
+    if len(pngs) > 1:
         pngs = pngs[-1:]
     result["pngs_b64"] = [base64.b64encode(item).decode("ascii") for item in pngs[:1]]
     if gif:
@@ -203,7 +203,8 @@ def _rpc_cli(method: str, path: str) -> int:
         req.add_header("Content-Type", "application/json")
         req.add_header("Content-Length", str(len(body)))
     try:
-        with urllib.request.urlopen(req, timeout=INPUT_COMMAND_TIMEOUT_SECONDS + 10) as resp:
+        rpc_timeout = max(INPUT_COMMAND_TIMEOUT_SECONDS, MAX_CALL_TIMEOUT_SECONDS) + 15
+        with urllib.request.urlopen(req, timeout=rpc_timeout) as resp:
             sys.stdout.buffer.write(resp.read())
             return 0
     except urllib.error.HTTPError as exc:

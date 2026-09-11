@@ -6,11 +6,13 @@ import pytest
 
 from gb_mcp.emulator.input_schema import (
     PlayArgs,
+    call_timeout_for_speed,
     parse_play_args,
     parse_play_input,
     play_input_from_args,
 )
 from gb_mcp.emulator.play_limits import (
+    DEFAULT_CALL_TIMEOUT_SECONDS,
     DEFAULT_EMULATION_SPEED,
     DEFAULT_HOLD_ABORT_LUMA_JUMP,
     DEFAULT_HOLD_ABORT_THRESHOLD,
@@ -20,9 +22,11 @@ from gb_mcp.emulator.play_limits import (
     DEFAULT_SCREENSHOT_MODE,
     DEFAULT_SCREENSHOT_SCALE,
     DEFAULT_UNTIL_EVAL_INTERVAL,
+    MAX_CALL_TIMEOUT_SECONDS,
     MAX_GAP_FRAMES,
     MAX_HOLD_FRAMES,
     MAX_INPUT_STEPS,
+    PUBLIC_DPAD_HOLD_FRAMES,
     PUBLIC_MASH_PRESS_FRAMES,
     PUBLIC_MASH_RELEASE_FRAMES,
 )
@@ -116,17 +120,18 @@ def test_old_buttons_path_still_parses() -> None:
 def test_parse_play_args_buttons_defaults() -> None:
     args = parse_play_args({"buttons": ["up"]})
     assert args.buttons == ("up",)
-    assert args.frames == 240
+    assert args.frames == PUBLIC_DPAD_HOLD_FRAMES
+    assert args.frames == 1800
     assert args.media == "image"
     assert "mash_press_frames" not in args.__dataclass_fields__
     play = play_input_from_args(args)
     assert play.macro == "hold"
     assert play.buttons == ("up",)
-    assert play.max_frames == 240
-    assert play.hold_frames == 240
+    assert play.max_frames == 1800
+    assert play.hold_frames == 1800
     assert play.apply_default_hold_abort is True
     assert play.screenshot_scale == DEFAULT_SCREENSHOT_SCALE
-    assert play.screenshot_scale == 4
+    assert play.screenshot_scale == 1
     assert play.emulation_speed == DEFAULT_EMULATION_SPEED
     assert play.emulation_speed == 0
     assert play.screenshot_mode == "interrupt_and_final"
@@ -134,10 +139,10 @@ def test_parse_play_args_buttons_defaults() -> None:
 
 
 def test_parse_play_args_dpad_omit_hold_vs_explicit_tap() -> None:
-    """Omit frames on a single D-pad → 240 hold; frames=16 stays a tap."""
+    """Omit frames on a single D-pad → 1800 hold; frames=16 stays a tap."""
     omitted = play_input_from_args(parse_play_args({"buttons": ["up"]}))
     assert omitted.macro == "hold"
-    assert omitted.max_frames == 240
+    assert omitted.max_frames == 1800
     assert omitted.apply_default_hold_abort is True
     assert omitted.screenshot_mode == "interrupt_and_final"
 
@@ -226,6 +231,10 @@ def test_parse_play_args_media_video_and_default_image() -> None:
     assert play.extra["media"] == "video"
     assert play.screenshot_mode == "final"
 
+    off_args = parse_play_args({"buttons": ["a"], "media": "off"})
+    assert off_args.media == "off"
+    assert play_input_from_args(off_args).extra["media"] == "off"
+
 
 def test_parse_play_args_ignores_internal_payload_keys() -> None:
     play = play_input_from_args(
@@ -266,10 +275,10 @@ def test_public_long_direction_is_hold_with_abort() -> None:
     assert tap.apply_default_hold_abort is False
     assert tap.screenshot_mode == DEFAULT_SCREENSHOT_MODE
 
-    hold = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 240}))
+    hold = play_input_from_args(parse_play_args({"buttons": ["up"], "frames": 1800}))
     assert hold.macro == "hold"
     assert hold.buttons == ("up",)
-    assert hold.max_frames == 240
+    assert hold.max_frames == 1800
     assert hold.apply_default_hold_abort is True
     assert hold.screenshot_mode == "interrupt_and_final"
 
@@ -328,14 +337,36 @@ def test_public_intent_parse() -> None:
     assert skip.intent == "skip_intro"
     door = parse_play_args({"intent": "enter_door"})
     assert door.intent == "enter_door"
+    until_ow = parse_play_args({"intent": "battle_until_overworld"})
+    assert until_ow.intent == "battle_until_overworld"
     with pytest.raises(ValueError, match="intent"):
         parse_play_args({"intent": "pathfind"})
 
 
 def test_public_video_keeps_final_for_gif_path() -> None:
     play = play_input_from_args(
-        parse_play_args({"buttons": ["up"], "frames": 240, "media": "video"})
+        parse_play_args({"buttons": ["up"], "frames": 1800, "media": "video"})
     )
     assert play.macro == "hold"
     assert play.extra["media"] == "video"
     assert play.screenshot_mode == "final"
+
+
+def test_default_hold_frames_and_scale() -> None:
+    assert PUBLIC_DPAD_HOLD_FRAMES == 1800
+    assert DEFAULT_SCREENSHOT_SCALE == 1
+    args = parse_play_args({"buttons": ["down"]})
+    assert args.frames == 1800
+    play = play_input_from_args(args)
+    assert play.screenshot_scale == 1
+    assert play.max_frames == 1800
+
+
+def test_call_timeout_for_speed_uncapped_long_hold() -> None:
+    timeout = call_timeout_for_speed(0, 1800)
+    assert 90.0 <= timeout <= 180.0
+    assert timeout != 20.0
+    assert timeout >= DEFAULT_CALL_TIMEOUT_SECONDS
+    assert timeout <= MAX_CALL_TIMEOUT_SECONDS
+    assert call_timeout_for_speed(0, 1) == DEFAULT_CALL_TIMEOUT_SECONDS
+    assert call_timeout_for_speed(0, 21600) == MAX_CALL_TIMEOUT_SECONDS

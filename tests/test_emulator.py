@@ -66,7 +66,7 @@ def test_load_starts_session_and_stop_saves(
     assert session._pyboy._pressed == set()
     assert len(sent["pngs"]) == 1
     preview = _assert_png(sent["pngs"][0])
-    assert preview.size == (640, 576)
+    assert preview.size == (160, 144)
     assert len(sent["pngs_native"]) == 1
     native = _assert_png(sent["pngs_native"][0])
     assert native.size == (160, 144)
@@ -238,7 +238,7 @@ def test_send_input_single_step_returns_one_png(
     assert sent["screenshots"][-1].get("step_index") == 0
     assert len(sent["pngs"]) == 1
     preview = _assert_png(sent["pngs"][0])
-    assert preview.size == (640, 576)
+    assert preview.size == (160, 144)
     assert len(sent["pngs_native"]) == 1
     native = _assert_png(sent["pngs_native"][0])
     assert native.size == (160, 144)
@@ -266,7 +266,7 @@ def test_send_input_steps_all_returns_one_png_per_step(
     images = [_assert_png(png) for png in sent["pngs"]]
     assert sent["pngs"][0] != sent["pngs"][1] != sent["pngs"][2]
     assert images[0].tobytes() != images[1].tobytes() != images[2].tobytes()
-    assert [image.size for image in images] == [(640, 576)] * 3
+    assert [image.size for image in images] == [(160, 144)] * 3
     assert len(sent["pngs_native"]) == 3
     natives = [_assert_png(png) for png in sent["pngs_native"]]
     assert [image.size for image in natives] == [(160, 144)] * 3
