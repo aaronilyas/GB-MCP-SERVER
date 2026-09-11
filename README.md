@@ -57,7 +57,7 @@ The supported operator/model catalog is six tools:
 | `add_rom` | Small homebrew: one `rom_base64` payload; isolated Docker validation; persist on success. Optional `email` |
 | `list_games` | Games mapped to this email (`title`, `id`, `playable`). Optional `email` |
 | `boot` | Start or resume a play instance. `reset=true` drops the PyBoy snapshot and cold-boots. Optional `email` |
-| `play` | Buttons / macros. Omit frames on a single D-pad to hold-walk (default 240); `frames=16` taps one tile. Holds abort on combat HUD, text, menu, fade, or blocked. Long mash/hold returns a GIF plus a native 160×144 final PNG; the MCP Image is the GIF or the **last** LCD, never an early keyframe. Screenshot-only — no memory dumps. Intents: `advance_text`, `run_away`, `battle_turn`, `skip_intro`, `enter_door`. No email argument |
+| `play` | Buttons / macros. Omit frames on a single D-pad to hold-walk (default 1800); `frames=16` taps one tile. Holds abort on combat HUD, text, menu, fade, or blocked. Default observation is one native 160×144 final PNG. GIF only when `media=video`. Screenshot-only — no memory dumps. Intents: `advance_text`, `run_away`, `battle_turn`, `battle_until_overworld`, `skip_intro`, `enter_door`. No email argument |
 | `save` | Write the PyBoy snapshot (`rom.gb.state`) without stopping. No email argument |
 | `stop` | Snapshot, flush cartridge SRAM (`rom.gb.ram`), remove the instance container. No email argument |
 
@@ -70,7 +70,8 @@ Legacy MCP names (`submit_gb_rom`, `send_pyboy_input`, `ping_pyboy`, the
 chunked-upload tools, …) are gone from the public catalog; see git history.
 
 One live session per email. Switching games saves and stops the old instance.
-Idle timeout (default 45 minutes) auto-saves and removes the container. A
+Idle timeout (default 3 hours / 10800 seconds, overridable via
+`GB_PYBOY_IDLE_TIMEOUT_SECONDS`) auto-saves and removes the container. A
 dead instance returns a short tool error, not a Docker dump.
 
 ## Run

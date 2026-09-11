@@ -1,4 +1,4 @@
-"""Mash / long-hold actions return one GIF + one final PNG, never a PNG list."""
+"""Action GIF packing is opt-in (media=video); default observation is one final PNG."""
 
 from __future__ import annotations
 

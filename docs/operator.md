@@ -126,14 +126,15 @@ email saves and stops the old instance, then starts the new one. `boot` of the
 already-running game is reused (`already_running`) and does not ignore a
 poisoned snapshot — use `reset=true` for a cold boot.
 
-Idle timeout defaults to **45 minutes** (`GB_PYBOY_IDLE_TIMEOUT_SECONDS`,
-default 2700). `play` resets that timer. After 45 minutes with no play
+Idle timeout defaults to **3 hours** (`GB_PYBOY_IDLE_TIMEOUT_SECONDS`,
+default 10800). `play` resets that timer. After 3 hours with no play
 activity the instance auto-saves (snapshot, then SRAM) and removes the
 container — the same close path as `stop`. The idle loop does not tick the
 emulator while waiting. `save` does not extend the idle window.
 
-Play is screenshot-only: 4× nearest-neighbor PNG stills (native 160×144 →
-640×576). There is no memory or game-state tool.
+Play is screenshot-only: one native 160×144 final PNG by default, not 4×.
+GIF only when `media=video` or `GB_MCP_MEDIA=video`. There is no memory or
+game-state tool. Session `input_log.jsonl` lands next to the ROM.
 
 Override session-start speed with `GB_PYBOY_EMULATION_SPEED` (default `0`,
 uncapped). See `.env.example` for the rest.

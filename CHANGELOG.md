@@ -1,26 +1,36 @@
 # Changelog
 
+## [Unreleased] — 2026-09-11
+
+### Long-run / cheap-media defaults (native PNG, 1800 hold, 3-hour idle)
+
+- Default `play` observation is one native 160×144 **final** PNG (`DEFAULT_SCREENSHOT_SCALE=1`, `DEFAULT_SCREENSHOT_MODE=final`, `DEFAULT_MEDIA=image`). GIF packing only when `media=video` or `GB_MCP_MEDIA=video`. `media` is `off|image|video`.
+- Omit `frames` on a single D-pad to hold-walk (**default 1800**). Explicit `frames=16` stays a one-tile tap. A/B omitted frames stay 16.
+- Idle timeout default is **3 hours** (`DEFAULT_IDLE_TIMEOUT_SECONDS=10800`, overridable via `GB_PYBOY_IDLE_TIMEOUT_SECONDS`). Call timeout default 90s, max 180s; input-command wait 120s.
+- Intents include `battle_until_overworld`. Session `input_log.jsonl` lands next to the ROM (`GB_MCP_INPUT_LOG`).
+- `HOW_TO_PLAY`: last image only, 1800 hold, do not request GIF, no frame-by-frame diaries, `battle_until_overworld`.
+
 ## [Unreleased] — 2026-09-10
 
 ### Screenshot-only play speed + game-agnostic LCD interrupts
 
-- The MCP Image is the **final** LCD of the call (4× PNG) or the action GIF — never an early keyframe. Public `screenshots` default to one native 160×144 `kind: "final"` (optional `interrupt` if an until/abort fired on another frame). Long mash/hold still pack a GIF; `media=image` does not hide it; the final native PNG remains in `screenshots`.
-- Omit `frames` on a single D-pad to hold-walk (**default 240**, `macro=hold` + default abort). Explicit `frames=16` stays a one-tile tap. A/B omitted frames stay 16. Mash without frames still uses the mash cap.
+- **Superseded** (cheap-media as of 2026-09-11; see the long-run / cheap-media section above). Historical: the MCP Image was the **final** LCD of the call (4× PNG) or the action GIF — never an early keyframe. Public `screenshots` defaulted to one native 160×144 `kind: "final"` (optional `interrupt` if an until/abort fired on another frame). Long mash/hold still packed a GIF; `media=image` did not hide it; the final native PNG remained in `screenshots`.
+- **Superseded** (hold default 1800 as of 2026-09-11). Historical: omit `frames` on a single D-pad to hold-walk (**default 240**, `macro=hold` + default abort). Explicit `frames=16` stays a one-tile tap. A/B omitted frames stay 16. Mash without frames still uses the mash cap.
 - Classifiers describe **GB LCD geometry** for any uploaded ROM: framed dialogue windows (bottom or lower-center, typewriter-partial OK), combat HUDs (dual status bars and/or command pane; tilemap fields rejected), pause/title panes (left, right, or full-width), and fade/occlusion that is **new vs the start-of-call baseline** (static camera letterbox is scenery). `until=stable` / `overworld` ignore near-uniform black/white warps until texture returns.
 - Hold abort: real combat/menu/textbox/fade only — camera scroll on a textured field must not look like battle. Blocked grace ≥ ~16 frames so a facing turn is not `stopped_reason=blocked`.
 - Intents (still six public tools): `advance_text` waits for a box then mashes; `run_away` pulses B and only navigates a detected command pane; `battle_turn` confirms with A on classifier edges (not `until=stable`); new `skip_intro` and `enter_door`. No game-specific menu cell graph as the only path.
-- OCR crops the `textbox_likely` inner rect from the PNG. `HOW_TO_PLAY` stays ≤2000 chars and game-agnostic. History under `docs/history/` is frozen, not living API.
+- OCR crops the `textbox_likely` inner rect from the PNG. `HOW_TO_PLAY` stays game-agnostic. **Superseded** char cap: was ≤2000; as of 2026-09-11 `HOW_TO_PLAY_MAX_CHARS=2200`. History under `docs/history/` is frozen, not living API.
 
-### Screenshot-only play: GIF default, mash pulses, honest looks_like, wall abort
+### Screenshot-only play: GIF default (superseded 2026-09-11), mash pulses, honest looks_like, wall abort
 
-- Long public `play` mash and directional holds (`frames` ≥ 30) return one looping GIF (GIF89a, 1–3s) plus a native 160×144 final PNG. Short taps stay a single PNG. `media=video` is accepted; `media=image` does not suppress the GIF. Do not dump a PNG keyframe list as the default observation.
-- Public `play(buttons=["up"], frames=240)` is a directional **hold** with default abort (battle, text, menu, fade, blocked wall). A 16-frame tap stays a one-tile chord.
+- **Superseded** (GIF is no longer the default observation as of 2026-09-11; see the long-run / cheap-media section above). Historical: long public `play` mash and directional holds (`frames` ≥ 30) returned one looping GIF (GIF89a, 1–3s) plus a native 160×144 final PNG. Short taps stayed a single PNG. `media=video` was accepted; `media=image` did not suppress the GIF. Do not dump a PNG keyframe list as the default observation.
+- **Superseded** (omitted-frames hold is 1800 as of 2026-09-11). Historical: public `play(buttons=["up"], frames=240)` was a directional **hold** with default abort (battle, text, menu, fade, blocked wall). A 16-frame tap stayed a one-tile chord. Omit-frames default was 240.
 - Public mash (`play(mash=true)` / `intent=advance_text`) pulses A (12 press / 8 release), stops when the textbox disappears, releases all buttons, then waits a short released gap so the next A does not re-talk. No textbox at start → brief wait, not hundreds of held-A frames.
 - `until_polarity=appears|disappears` (default appears). Aliases: `textbox_end` / `clear_text` (textbox disappears), `overworld` (battle gone then stable). Public `until=fade` is a luma jump vs start-of-call, not full-screen camera scroll. `until=blocked` is a coarse center crop (`PLAYER_BLOCKED_REGION` + `BLOCKED_COARSE_L1`) that stays still (walk-cycle bob and off-center NPCs ignored).
 - `looks_like` stays LCD-only and is omitted when no classifier is confidently true. Textured overworld / house facades are not `battle` or `menu`. Fade is not a dark rug. `looks_like` prefers textbox over battle. Public JSON may include `stopped_reason`, `player_moved`, `textbox_complete`, and `ocr_text` (inner textbox crop only).
 - Public directional holds abort with `stopped_reason=blocked` / `player_moved=false` when the coarse center crop is stuck. Camera scroll still completes. Combat / menu / textbox / fade still abort first.
 - Gap cap is 180 frames. Optional `intent`: `advance_text`, `run_away`, `battle_turn` — composed from existing engine primitives, not new MCP tools. `skip_intro` and `enter_door` landed in the section above.
-- `HOW_TO_PLAY` teaches long holds, pulse mash, flee/turn intents, and reading the GIF on long walks. Catalog tests pin that text and the published `play` schema so a stale hosted deploy cannot silently serve the pre-GIF catalog.
+- **Superseded** (`HOW_TO_PLAY` as of 2026-09-11 teaches last image only and “do not request GIF”). Historical: `HOW_TO_PLAY` taught long holds, pulse mash, flee/turn intents, and reading the GIF on long walks. Catalog tests pinned that text and the published `play` schema so a stale hosted deploy could not silently serve the pre-GIF catalog.
 
 ## [Unreleased] — 2026-09-08
 
@@ -39,7 +49,7 @@
 
 - MCP `tools/list` is six tools: `add_rom`, `list_games`, `boot`, `play`, `save`, `stop`. The model no longer sees chunked upload tools, `map_subdirectory_to_email`, `ping_pyboy`, or the old play names (`submit_gb_rom`, `list_subdirectories_for_email`, `load_subdirectory_rom`, `reset_pyboy`, `send_pyboy_input`, `save_battery`, `stop_pyboy`).
 - After `boot`, `play` / `save` / `stop` take no email or subdirectory. Identity comes from the OAuth session bind. Large dumps use `POST /roms`, not chat chunks.
-- Play replies are `{ok, frames, stopped, game}` plus one 4× PNG or one short GIF. The model no longer sees hashes, OCR, screenshot modes, idle countdowns, or `battle_likely`.
+- **Superseded** (default observation is native PNG as of 2026-09-11; GIF only with `media=video`). Historical: play replies were `{ok, frames, stopped, game}` plus one 4× PNG or one short GIF. The model no longer sees hashes, OCR, screenshot modes, idle countdowns, or `battle_likely`.
 - Resources are `gb://how-to-play`, `gb://screen`, `gb://session`. `gb://usage` and `gb://users/{email}/...` are gone. Server `instructions` match `gb://how-to-play`.
 
 ## [Unreleased] — 2026-09-05
@@ -63,8 +73,8 @@
 
 ### Screenshot-only play loop
 
-- `send_pyboy_input` accepts macros (`hold`, `mash`, `steps`, `buttons`), `until` framebuffer interrupts, wait steps, `gap_frames`, screenshot modes `interrupt_and_final` / `keyframes`, `screenshot_scale` 1–4 (default 4), and uncapped `emulation_speed` (default 0). Caps: 500 steps, `hold_frames` 1–3600. There is no memory or game-state tool; `until` is screenshot-derived on the native 160×144 LCD.
-- Idle timeout is 45 minutes (`GB_PYBOY_IDLE_TIMEOUT_SECONDS`, default 2700). `ping_pyboy` resets the idle timer without advancing emulation.
+- `send_pyboy_input` accepts macros (`hold`, `mash`, `steps`, `buttons`), `until` framebuffer interrupts, wait steps, `gap_frames`, screenshot modes `interrupt_and_final` / `keyframes`, `screenshot_scale` 1–4, and uncapped `emulation_speed` (default 0). Caps: 500 steps, `hold_frames` 1–3600. There is no memory or game-state tool; `until` is screenshot-derived on the native 160×144 LCD. **Superseded** scale default: was 4; as of 2026-09-11 `DEFAULT_SCREENSHOT_SCALE=1`.
+- **Superseded** (idle default 3 hours / 10800 as of 2026-09-11). Historical: idle timeout was 45 minutes (`GB_PYBOY_IDLE_TIMEOUT_SECONDS`, default 2700). `ping_pyboy` resets the idle timer without advancing emulation.
 - `load_subdirectory_rom` accepts `emulation_speed` and `idle_timeout_seconds`. `submit_gb_rom` accepts `boot=true` to start PyBoy after a mapped submit.
 
 ### Size-strict ROM validation and chunked uploads

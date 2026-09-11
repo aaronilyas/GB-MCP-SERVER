@@ -350,8 +350,9 @@ def play(
 ) -> list[dict[str, Any] | Image] | dict[str, Any]:
     """Press buttons on the current session and look at the returned LCD.
 
-    Long directional ``frames`` become a hold that aborts on battle, text,
-    menu, fade, or a blocked wall. Dialogue uses mash or ``intent=advance_text``.
+    Omit frames on a single D-pad to hold-walk (default 1800); ``frames=16``
+    taps. Long directional holds abort on battle, text, menu, fade, or a
+    blocked wall. Dialogue uses mash or ``intent=advance_text``.
     Default observation is one native 160x144 PNG of the last LCD. Pass
     ``media="video"`` for a GIF; ``screenshot_scale`` 2/3/4 upscales.
     """

@@ -59,10 +59,9 @@ def test_how_to_play_omits_old_tool_names() -> None:
         assert name not in text, name
 
 
-def test_how_to_play_teaches_gif_blocked_mash_and_intent() -> None:
+def test_how_to_play_teaches_last_image_blocked_mash_and_intent() -> None:
     text = HOW_TO_PLAY
     assert len(text.strip()) <= HOW_TO_PLAY_MAX_CHARS
-    assert "GIF" in text
     assert "blocked" in text
     assert "intent" in text
     assert "until_polarity" in text or "textbox_end" in text

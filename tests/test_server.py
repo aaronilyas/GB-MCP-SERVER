@@ -150,7 +150,7 @@ def test_instructions_match_how_to_play() -> None:
     assert server.how_to_play_resource() == HOW_TO_PLAY
 
 
-def test_play_tool_schema_pins_gif_blocked_intent_catalog() -> None:
+def test_play_tool_schema_pins_hold_blocked_intent_catalog() -> None:
     tools = {t.name: t for t in server.mcp._tool_manager.list_tools()}
     assert len(tools) == 6
     assert set(tools) == set(_PUBLIC_TOOL_NAMES)
@@ -167,12 +167,14 @@ def test_play_tool_schema_pins_gif_blocked_intent_catalog() -> None:
     frames_desc = (props["frames"].get("description") or "").lower()
     until_polarity_desc = (props["until_polarity"].get("description") or "").lower()
     blob = f"{desc} {mash_desc} {intent_desc} {frames_desc} {until_desc} {until_polarity_desc}"
-    assert "gif" in desc
+    assert "do not request gif" in desc
+    assert "native" in desc and "160x144" in desc
     assert "pulse" in blob or "advance_text" in intent_desc
     assert "release" in mash_desc
     assert "mash a for frames ticks" not in blob
     assert "png keyframes" not in blob
     assert "skip_intro" in intent_desc
+    assert "battle_until_overworld" in intent_desc
     assert "1800" in frames_desc
     assert "omit" in frames_desc
     for old in ("blake2s", "battle_likely", "ping_pyboy", "send_pyboy_input"):
